@@ -2,7 +2,6 @@ import os
 import re
 import time
 import json
-import random
 import hashlib
 from datetime import datetime
 
@@ -52,33 +51,6 @@ URLS_OFICIAIS = [
 ]
 
 # =========================================================
-# FUNÇÕES AUXILIARES - DATA / JSON / HASH
-# =========================================================
-def agora_str():
-    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-
-
-def agora_arquivo():
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def salvar_json(caminho: str, dados: dict):
-    with open(caminho, "w", encoding="utf-8") as f:
-        json.dump(dados, f, ensure_ascii=False, indent=2)
-
-
-def ler_json(caminho: str):
-    if not os.path.exists(caminho):
-        return None
-    with open(caminho, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def gerar_hash_texto(texto: str) -> str:
-    return hashlib.sha256(texto.encode("utf-8")).hexdigest()
-
-
-# =========================================================
 # FUNÇÕES AUXILIARES - GEMINI
 # =========================================================
 def configurar_modelo():
@@ -106,59 +78,36 @@ def configurar_modelo():
         st.stop()
 
 
-def extrair_retry_seconds(mensagem_erro: str, default: int = 35) -> int:
-    """
-    Tenta extrair o tempo de retry a partir da mensagem da API.
-    Ex.: 'Please retry in 32.867444365s'
-    """
-    try:
-        padrao = r"retry in\s+([0-9]+(?:\.[0-9]+)?)s"
-        match = re.search(padrao, mensagem_erro, re.IGNORECASE)
-        if match:
-            return max(1, int(float(match.group(1))) + 1)
-    except Exception:
-        pass
-    return default
+# =========================================================
+# FUNÇÕES AUXILIARES - ARQUIVOS / CACHE
+# =========================================================
+def agora_str():
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 
-def eh_erro_quota_429(erro: Exception) -> bool:
-    mensagem = str(erro).lower()
-    return (
-        "429" in mensagem
-        or "quota exceeded" in mensagem
-        or "rate limit" in mensagem
-        or "too many requests" in mensagem
-    )
+def agora_arquivo():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def gerar_com_retry(model, prompt: str, usar_google_search: bool = False, max_tentativas: int = 3):
-    """
-    Faz generate_content com retry automático para erro 429 / quota.
-    """
-    ultimo_erro = None
+def salvar_json(caminho: str, dados: dict):
+    with open(caminho, "w", encoding="utf-8") as f:
+        json.dump(dados, f, ensure_ascii=False, indent=2)
 
-    for tentativa in range(1, max_tentativas + 1):
-        try:
-            if usar_google_search:
-                return model.generate_content(prompt, tools="google_search_retrieval")
-            return model.generate_content(prompt)
 
-        except Exception as e:
-            ultimo_erro = e
+def ler_json(caminho: str):
+    if not os.path.exists(caminho):
+        return None
+    with open(caminho, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-            if eh_erro_quota_429(e) and tentativa < max_tentativas:
-                espera = extrair_retry_seconds(str(e), default=35)
-                espera += random.randint(1, 3)
 
-                with st.spinner(
-                    f"Cota temporariamente excedida. Aguardando {espera}s para tentar novamente "
-                    f"({tentativa}/{max_tentativas})..."
-                ):
-                    time.sleep(espera)
-            else:
-                raise ultimo_erro
+def gerar_hash_texto(texto: str) -> str:
+    return hashlib.sha256(texto.encode("utf-8")).hexdigest()
 
-    raise ultimo_erro
+
+def caminho_cache_portal(nome_portal: str) -> str:
+    nome_limpo = re.sub(r"[^a-zA-Z0-9_]+", "_", nome_portal.lower()).strip("_")
+    return os.path.join(PASTA_CACHE, f"{nome_limpo}.json")
 
 
 # =========================================================
@@ -219,33 +168,13 @@ def limpar_html_para_texto(html: str) -> str:
         tag.decompose()
 
     texto = soup.get_text(separator=" ", strip=True)
+
+    # limpeza básica
     texto = re.sub(r"\s+", " ", texto).strip()
+
     return texto
 
 
-def extrair_texto_da_url(url: str, limite_chars: int = 18000) -> str:
-    html = baixar_html(url)
-    texto = limpar_html_para_texto(html)
-    return texto[:limite_chars]
-
-
-def coletar_portal(nome: str, url: str):
-    texto = extrair_texto_da_url(url)
-    hash_texto = gerar_hash_texto(texto)
-    timestamp = agora_str()
-
-    return {
-        "nome": nome,
-        "url": url,
-        "texto": texto,
-        "hash": hash_texto,
-        "coletado_em": timestamp
-    }
-
-
-# =========================================================
-# FUNÇÕES AUXILIARES - COMPARAÇÃO
-# =========================================================
 def segmentar_texto_em_blocos(texto: str, tamanho_bloco: int = 1200):
     palavras = texto.split()
     blocos = []
@@ -283,6 +212,26 @@ def comparar_textos_textualmente(texto_antigo: str, texto_novo: str, max_novidad
     return {
         "novidades": novidades,
         "quantidade_novidades": len(novidades)
+    }
+
+
+def extrair_texto_da_url(url: str, limite_chars: int = 18000) -> str:
+    html = baixar_html(url)
+    texto = limpar_html_para_texto(html)
+    return texto[:limite_chars]
+
+
+def coletar_portal(nome: str, url: str):
+    texto = extrair_texto_da_url(url)
+    hash_texto = gerar_hash_texto(texto)
+    timestamp = agora_str()
+
+    return {
+        "nome": nome,
+        "url": url,
+        "texto": texto,
+        "hash": hash_texto,
+        "coletado_em": timestamp
     }
 
 
@@ -381,45 +330,20 @@ FORMATO OBRIGATÓRIO:
 """
 
 
-# =========================================================
-# FUNÇÕES AUXILIARES - FALLBACK SEM IA
-# =========================================================
-def montar_relatorio_fallback_sem_ia(dados_portais: list, comparacoes: dict) -> str:
-    linhas = []
-    linhas.append("## Relatório emergencial sem IA")
-    linhas.append("")
-    linhas.append("A análise por IA não pôde ser concluída neste momento por limite de cota da API.")
-    linhas.append("Abaixo está um resumo operacional baseado apenas na coleta e comparação textual.")
-    linhas.append("")
+def gerar_prompt_resumo_novidades(comparacoes: dict) -> str:
+    return f"""
+Com base neste dicionário de comparação entre scraping atual e anterior:
+{json.dumps(comparacoes, ensure_ascii=False, indent=2)}
 
-    for item in dados_portais:
-        nome = item["nome"]
-        comp = comparacoes.get(nome, {})
-        qtd = comp.get("quantidade_novidades", 0)
-
-        linhas.append(f"### {nome}")
-        linhas.append(f"- URL: {item['url']}")
-        linhas.append(f"- Coletado em: {item['coletado_em']}")
-        linhas.append(f"- Novidades textuais detectadas: {qtd}")
-
-        novidades = comp.get("novidades", [])
-        if novidades:
-            linhas.append("- Trechos novos/diferentes encontrados:")
-            for idx, novidade in enumerate(novidades[:5], start=1):
-                linhas.append(f"  {idx}. {novidade}")
-        else:
-            linhas.append("- Nenhuma novidade textual relevante detectada.")
-
-        linhas.append("")
-
-    linhas.append("### Recomendação")
-    linhas.append("- Reexecute a análise após a janela de retry da API ou use uma chave/projeto com cota superior.")
-
-    return "\n".join(linhas)
+Resuma em linguagem executiva:
+- quais portais tiveram mudança
+- se a mudança parece relevante ou apenas estrutural
+- o que deve ser monitorado no próximo ciclo
+"""
 
 
 # =========================================================
-# FUNÇÕES AUXILIARES - EXPORTAÇÃO
+# FUNÇÕES AUXILIARES - RELATÓRIOS / EXPORTAÇÃO
 # =========================================================
 def montar_texto_exportacao_relatorio(relatorio_ia: str, dados_portais: list, comparacoes: dict) -> str:
     linhas = []
@@ -427,7 +351,7 @@ def montar_texto_exportacao_relatorio(relatorio_ia: str, dados_portais: list, co
     linhas.append(f"Gerado em: {agora_str()}")
     linhas.append("=" * 80)
     linhas.append("")
-    linhas.append("RELATÓRIO")
+    linhas.append("RELATÓRIO IA")
     linhas.append(relatorio_ia)
     linhas.append("")
     linhas.append("=" * 80)
@@ -459,7 +383,7 @@ def montar_markdown_exportacao(relatorio_ia: str, dados_portais: list, comparaco
     md = []
     md.append("# Relatório de Monitoramento Oficial - Reforma Tributária")
     md.append(f"**Gerado em:** {agora_str()}\n")
-    md.append("## Relatório")
+    md.append("## Relatório IA")
     md.append(relatorio_ia)
     md.append("\n## Resumo de comparação por portal")
 
@@ -490,7 +414,6 @@ def salvar_execucao_atual(dados_portais: list, comparacoes: dict, relatorio_ia: 
         "comparacoes": comparacoes,
         "relatorio_ia": relatorio_ia
     }
-
     salvar_json(ARQUIVO_ULTIMA_EXECUCAO, payload)
 
     timestamp = agora_arquivo()
@@ -517,7 +440,7 @@ aba1, aba2, aba3, aba4 = st.tabs([
 ])
 
 # =========================================================
-# ABA 1 - RADAR GERAL
+# ABA 1
 # =========================================================
 with aba1:
     st.header("Radar de Atualizações (Via Google)")
@@ -531,33 +454,16 @@ focando em IBS, CBS, SPED, EFD-Reinf e DCTFWeb para o ano atual.
 Resuma as mudanças para uma contadora de Lucro Presumido e Real.
 """
             try:
-                resposta = gerar_com_retry(
-                    model,
-                    prompt_busca,
-                    usar_google_search=True,
-                    max_tentativas=3
-                )
+                resposta = model.generate_content(prompt_busca, tools="google_search_retrieval")
                 st.success("Relatório gerado com dados atualizados da Web!")
                 st.markdown(resposta.text)
-
             except Exception:
-                try:
-                    resposta = gerar_com_retry(
-                        model,
-                        prompt_busca,
-                        usar_google_search=False,
-                        max_tentativas=2
-                    )
-                    st.warning("Busca ao vivo indisponível. Utilizando resposta sem grounding.")
-                    st.markdown(resposta.text)
-                except Exception as e:
-                    if eh_erro_quota_429(e):
-                        st.error("A cota da API Gemini foi excedida. Aguarde um pouco e tente novamente.")
-                    else:
-                        st.error(f"Erro ao consultar a IA: {e}")
+                st.warning("Busca ao vivo indisponível. Utilizando resposta sem grounding.")
+                resposta = model.generate_content(prompt_busca)
+                st.markdown(resposta.text)
 
 # =========================================================
-# ABA 2 - ANÁLISE DE XML
+# ABA 2
 # =========================================================
 with aba2:
     st.header("Análise de Impacto Tributário via XML")
@@ -591,22 +497,14 @@ XML:
 {conteudo_xml}
 """
                 try:
-                    resposta_xml = gerar_com_retry(
-                        model,
-                        prompt_analise,
-                        usar_google_search=False,
-                        max_tentativas=3
-                    )
+                    resposta_xml = model.generate_content(prompt_analise)
                     st.success("Análise concluída!")
                     st.markdown(resposta_xml.text)
                 except Exception as e:
-                    if eh_erro_quota_429(e):
-                        st.error("A cota da API Gemini foi excedida. Aguarde um pouco e tente novamente.")
-                    else:
-                        st.error(f"Erro ao analisar o XML: {e}")
+                    st.error(f"Erro ao analisar o XML: {e}")
 
 # =========================================================
-# ABA 3 - CHAT OFICIAL
+# ABA 3
 # =========================================================
 with aba3:
     st.header("💬 Tire dúvidas com a IA Fiscal (Fontes Oficiais)")
@@ -619,10 +517,7 @@ with aba3:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    pergunta_usuario = st.chat_input(
-        "Ex: Quais as novas regras de transição publicadas hoje?",
-        key="chat_oficial"
-    )
+    pergunta_usuario = st.chat_input("Ex: Quais as novas regras de transição publicadas hoje?", key="chat_oficial")
 
     if pergunta_usuario:
         st.chat_message("user").markdown(pergunta_usuario)
@@ -633,33 +528,18 @@ with aba3:
                 prompt_chat = gerar_prompt_chat_oficial(pergunta_usuario)
 
                 try:
-                    resposta_chat = gerar_com_retry(
-                        model,
-                        prompt_chat,
-                        usar_google_search=True,
-                        max_tentativas=3
-                    )
+                    resposta_chat = model.generate_content(prompt_chat, tools="google_search_retrieval")
                 except Exception:
-                    resposta_chat = gerar_com_retry(
-                        model,
-                        prompt_chat,
-                        usar_google_search=False,
-                        max_tentativas=2
-                    )
+                    resposta_chat = model.generate_content(prompt_chat)
 
                 st.chat_message("assistant").markdown(resposta_chat.text)
-                st.session_state.mensagens_chat_oficial.append(
-                    {"role": "assistant", "content": resposta_chat.text}
-                )
+                st.session_state.mensagens_chat_oficial.append({"role": "assistant", "content": resposta_chat.text})
 
             except Exception as e:
-                if eh_erro_quota_429(e):
-                    st.error("A cota da API Gemini foi excedida no momento. Aguarde um pouco e tente novamente.")
-                else:
-                    st.error(f"Erro no chat oficial: {e}")
+                st.error(f"Erro no chat oficial: {e}")
 
 # =========================================================
-# ABA 4 - WEB REAL V2
+# ABA 4
 # =========================================================
 with aba4:
     st.header("🏛️ Web Real V2 (Scraping Oficial)")
@@ -708,11 +588,7 @@ with aba4:
 
                     item_antigo = mapa_anterior.get(nome)
                     texto_antigo = item_antigo["texto"] if item_antigo else ""
-                    comparacao = comparar_textos_textualmente(
-                        texto_antigo,
-                        item_atual["texto"],
-                        max_novidades=12
-                    )
+                    comparacao = comparar_textos_textualmente(texto_antigo, item_atual["texto"], max_novidades=12)
                     comparacoes[nome] = comparacao
 
                     st.toast(f"✅ Coleta concluída: {nome}")
@@ -738,74 +614,53 @@ with aba4:
             with st.spinner("Gerando relatório analítico com base nos textos oficiais..."):
                 try:
                     prompt_relatorio = gerar_prompt_relatorio_scraping(dados_portais, comparacoes)
+                    relatorio = model.generate_content(prompt_relatorio)
 
-                    relatorio = gerar_com_retry(
-                        model,
-                        prompt_relatorio,
-                        usar_google_search=False,
-                        max_tentativas=3
-                    )
-
-                    texto_relatorio_final = relatorio.text
                     st.success("Scraping e análise concluídos com sucesso!")
                     st.markdown("## Relatório Executivo")
-                    st.markdown(texto_relatorio_final)
+                    st.markdown(relatorio.text)
+
+                    # Painel de comparação
+                    st.markdown("## Painel de Novidades Detectadas")
+                    for nome_portal, comp in comparacoes.items():
+                        with st.expander(f"{nome_portal} — {comp.get('quantidade_novidades', 0)} novidade(s) textual(is)"):
+                            novidades = comp.get("novidades", [])
+                            if novidades:
+                                for i, novidade in enumerate(novidades[:8], start=1):
+                                    st.write(f"**{i}.** {novidade}")
+                            else:
+                                st.write("Nenhuma novidade textual relevante detectada.")
+
+                    # Texto bruto
+                    with st.expander("Ver texto bruto extraído dos portais"):
+                        for item in dados_portais:
+                            st.markdown(f"### {item['nome']}")
+                            st.text(item["texto"][:5000] + "\n... [conteúdo truncado]")
+
+                    # Exportações
+                    txt_export = montar_texto_exportacao_relatorio(relatorio.text, dados_portais, comparacoes)
+                    md_export = montar_markdown_exportacao(relatorio.text, dados_portais, comparacoes)
+
+                    st.download_button(
+                        label="📥 Baixar relatório em TXT",
+                        data=txt_export,
+                        file_name=f"relatorio_reforma_tributaria_{agora_arquivo()}.txt",
+                        mime="text/plain"
+                    )
+
+                    st.download_button(
+                        label="📥 Baixar relatório em Markdown",
+                        data=md_export,
+                        file_name=f"relatorio_reforma_tributaria_{agora_arquivo()}.md",
+                        mime="text/markdown"
+                    )
+
+                    # Persistência
+                    salvar_execucao_atual(dados_portais, comparacoes, relatorio.text)
+
+                    st.info("Execução salva com sucesso para comparações futuras.")
 
                 except Exception as e:
-                    if eh_erro_quota_429(e):
-                        st.warning(
-                            "A IA não pôde concluir a análise porque a cota da API foi excedida. "
-                            "Vou exibir um relatório emergencial sem IA."
-                        )
-                        texto_relatorio_final = montar_relatorio_fallback_sem_ia(dados_portais, comparacoes)
-                        st.markdown(texto_relatorio_final)
-                    else:
-                        st.error(f"Erro ao gerar relatório da IA: {e}")
-                        texto_relatorio_final = montar_relatorio_fallback_sem_ia(dados_portais, comparacoes)
-                        st.markdown(texto_relatorio_final)
-
-            st.markdown("## Painel de Novidades Detectadas")
-            for nome_portal, comp in comparacoes.items():
-                with st.expander(f"{nome_portal} — {comp.get('quantidade_novidades', 0)} novidade(s) textual(is)"):
-                    novidades = comp.get("novidades", [])
-                    if novidades:
-                        for i, novidade in enumerate(novidades[:8], start=1):
-                            st.write(f"**{i}.** {novidade}")
-                    else:
-                        st.write("Nenhuma novidade textual relevante detectada.")
-
-            with st.expander("Ver texto bruto extraído dos portais"):
-                for item in dados_portais:
-                    st.markdown(f"### {item['nome']}")
-                    st.text(item["texto"][:5000] + "\n... [conteúdo truncado]")
-
-            txt_export = montar_texto_exportacao_relatorio(
-                texto_relatorio_final,
-                dados_portais,
-                comparacoes
-            )
-            md_export = montar_markdown_exportacao(
-                texto_relatorio_final,
-                dados_portais,
-                comparacoes
-            )
-
-            st.download_button(
-                label="📥 Baixar relatório em TXT",
-                data=txt_export,
-                file_name=f"relatorio_reforma_tributaria_{agora_arquivo()}.txt",
-                mime="text/plain"
-            )
-
-            st.download_button(
-                label="📥 Baixar relatório em Markdown",
-                data=md_export,
-                file_name=f"relatorio_reforma_tributaria_{agora_arquivo()}.md",
-                mime="text/markdown"
-            )
-
-            salvar_execucao_atual(dados_portais, comparacoes, texto_relatorio_final)
-            st.info("Execução salva com sucesso para comparações futuras.")
-
+                    st.error(f"Erro ao gerar relatório da IA: {e}")
         else:
             st.error("Não foi possível extrair texto de nenhum dos portais oficiais no momento.")

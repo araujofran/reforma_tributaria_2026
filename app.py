@@ -2,16 +2,33 @@ import streamlit as st
 import google.generativeai as genai
 
 # ==========================================
-# CONFIGURAÇÃO DA API (LLM)
+# CONFIGURAÇÃO DA API (LLM) - BUSCA DINÂMICA
 # ==========================================
-# No Streamlit Cloud, você salvará essa chave em "Settings > Secrets"
-# Exemplo de secret: GEMINI_API_KEY = "sua_chave_aqui"
 try:
+    # 1. Autentica com a chave
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    # Usando o modelo flash, que é rápido e excelente para análise de texto/XML
-    model = genai.GenerativeModel('gemini-pro') 
+    
+    # 2. Pergunta ao Google quais modelos estão disponíveis para essa chave
+    modelo_escolhido = None
+    for m in genai.list_models():
+        # Verifica se o modelo serve para gerar conteúdo (text/chat)
+        if 'generateContent' in m.supported_generation_methods:
+            modelo_escolhido = m.name
+            # Se encontrar a família flash ou pro, dá preferência
+            if 'flash' in m.name.lower() or 'pro' in m.name.lower():
+                break 
+                
+    # 3. Instancia o modelo correto
+    if modelo_escolhido:
+        model = genai.GenerativeModel(modelo_escolhido)
+        # st.sidebar.success(f"Conectado ao modelo: {modelo_escolhido}") # Opcional: tire o '#' para ver o nome na tela
+    else:
+        st.error("ERRO: Nenhum modelo de geração de texto disponível para esta chave de API.")
+
+except KeyError:
+    st.error("ERRO: A variável 'GEMINI_API_KEY' não foi encontrada nos Secrets do Streamlit.")
 except Exception as e:
-    st.warning("API Key não configurada. Configure no Streamlit Secrets.")
+    st.error(f"ERRO DE CONEXÃO COM A API: {e}")
 
 # ==========================================
 # INTERFACE DO USUÁRIO

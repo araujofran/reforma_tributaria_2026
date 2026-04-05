@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ConsultarNfseResposta xmlns="http://www.abrasf.org.br/nfse.xsd">
+    <ListaNfse>
+        <CompNfse>
+            <Nfse>
+                <InfNfse>
+                    <Numero>2026000145</Numero>
+                    <CodigoVerificacao>A1B2C3D4</CodigoVerificacao>
+                    <DataEmissao>2026-04-05T10:00:00</DataEmissao>
+                    <ValoresNfse>
+                        <BaseCalculo>15000.00</BaseCalculo>
+                        <Aliquota>5.00</Aliquota>
+                        <ValorIss>750.00</ValorIss>
+                        <ValorLiquidoNfse>14250.00</ValorLiquidoNfse>
+                    </ValoresNfse>
+                    <Servico>
+                        <ItemListaServico>01.01</ItemListaServico>
+                        <Discriminacao>Servicos prestados de consultoria em tecnologia da informacao e analise de sistemas referentes ao mes de marco.</Discriminacao>
+                        <CodigoMunicipio>3550308</CodigoMunicipio>
+                    </Servico>
+                    <PrestadorServico>
+                        <IdentificacaoPrestador>
+                            <Cnpj>12345678000199</Cnpj>
+                        </IdentificacaoPrestador>
+                        <RazaoSocial>TECH CONSULTING LTDA</RazaoSocial>
+                        <RegimeEspecialTributacao>0</RegimeEspecialTributacao>
+                        <OptanteSimplesNacional>2</OptanteSimplesNacional>
+                    </PrestadorServico>
+                    <TomadorServico>
+                        <IdentificacaoTomador>
+                            <Cnpj>98765432000111</Cnpj>
+                        </IdentificacaoTomador>
+                        <RazaoSocial>EMPRESA CLIENTE S/A</RazaoSocial>
+                    </TomadorServico>
+                </InfNfse>
+            </Nfse>
+        </CompNfse>
+    </ListaNfse>
+</ConsultarNfseResposta>

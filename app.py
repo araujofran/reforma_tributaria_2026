@@ -1,8 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
-import requests
-import cloudscraper
 from bs4 import BeautifulSoup
+from curl_cffi import requests as requests_cffi
 
 # ==========================================
 # CONFIGURAÇÃO DA API (LLM) E BUSCA DINÂMICA
@@ -141,20 +140,11 @@ with aba4:
     if st.button("Executar Web Scraping nos Portais do Governo"):
         textos_extraidos = ""
         
-        with st.spinner("Ativando Cloudscraper antibloqueio e acessando servidores..."):
-            # Cria o scraper especializado em pular firewalls de segurança (como o do CGIBS)
-            scraper = cloudscraper.create_scraper(
-                browser={
-                    'browser': 'chrome',
-                    'platform': 'windows',
-                    'desktop': True
-                }
-            )
-            
+        with st.spinner("Ativando motor TLS avançado (curl_cffi) para burlar bloqueios..."):
             for url in urls_oficiais:
                 try:
-                    # Usamos o scraper em vez do 'requests'
-                    resposta_site = scraper.get(url, timeout=20) 
+                    # Impersonate="chrome120" força a assinatura criptográfica a ser idêntica ao Google Chrome
+                    resposta_site = requests_cffi.get(url, impersonate="chrome120", timeout=20) 
                     
                     if resposta_site.status_code == 200:
                         soup = BeautifulSoup(resposta_site.content, 'html.parser')
@@ -162,6 +152,7 @@ with aba4:
                         
                         textos_extraidos += f"\n\n--- TEXTO EXTRAÍDO DA URL: {url} ---\n"
                         textos_extraidos += texto_limpo[:15000]
+                        st.toast(f"✅ Sucesso ao ler: {url}") # Mostra um aviso rápido na tela de sucesso
                     else:
                         st.warning(f"Não foi possível acessar a URL {url}. Status: {resposta_site.status_code}")
                 except Exception as erro_scraping:

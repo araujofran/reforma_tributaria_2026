@@ -592,6 +592,76 @@ def salvar_execucao_atual(dados_portais: list, comparacoes: dict, relatorio_ia: 
 # INTERFACE
 # =========================================================
 st.title("📊 Assistente Inteligente da Reforma Tributária — V3")
+# =========================================================
+# 🔍 DIAGNÓSTICO DE CHAVES (DEBUG LLMs)
+# =========================================================
+with st.expander("🔍 Diagnóstico de Conexão com LLMs (Debug)", expanded=False):
+
+    st.markdown("### 🔐 Verificação de Secrets")
+
+    tem_groq = "GROQ_API_KEY" in st.secrets
+    tem_openrouter = "OPENROUTER_API_KEY" in st.secrets
+    tem_gemini = "GEMINI_API_KEY" in st.secrets
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.write("Gemini existe?", "✅" if tem_gemini else "❌")
+
+    with col2:
+        st.write("Groq existe?", "✅" if tem_groq else "❌")
+
+    with col3:
+        st.write("OpenRouter existe?", "✅" if tem_openrouter else "❌")
+
+    st.markdown("---")
+
+    st.markdown("### 🔎 Prefixos das Chaves (seguro)")
+
+    if tem_gemini:
+        st.write("Gemini prefixo:", st.secrets["GEMINI_API_KEY"][:6] + "...")
+
+    if tem_groq:
+        st.write("Groq prefixo:", st.secrets["GROQ_API_KEY"][:6] + "...")
+
+    if tem_openrouter:
+        st.write("OpenRouter prefixo:", st.secrets["OPENROUTER_API_KEY"][:6] + "...")
+
+    st.markdown("---")
+
+    st.markdown("### ⚠️ Diagnóstico Inteligente")
+
+    if not tem_groq and not tem_openrouter:
+        st.error("❌ Nenhum fallback configurado (Groq/OpenRouter). Seu sistema depende só do Gemini.")
+
+    elif tem_groq and not tem_openrouter:
+        st.warning("⚠️ Apenas Groq configurado. OpenRouter ainda não está ativo.")
+
+    elif not tem_groq and tem_openrouter:
+        st.warning("⚠️ Apenas OpenRouter configurado. Groq ainda não está ativo.")
+
+    elif tem_groq and tem_openrouter:
+        st.success("✅ Fallback completo ativo (Gemini + Groq + OpenRouter)")
+
+    if not tem_gemini:
+        st.error("❌ Gemini não configurado — você perderá o grounding (busca web)")
+
+    st.markdown("---")
+
+    st.markdown("### 🧠 Possíveis Problemas")
+
+    if not tem_groq or not tem_openrouter:
+        st.info("""
+Se a chave está correta mas aparece como ❌:
+
+1. Verifique se colocou no **Streamlit Cloud (Secrets)** e não só local
+2. Confirme o nome EXATO:
+   - GROQ_API_KEY
+   - OPENROUTER_API_KEY
+3. Reinicie o app (Deploy → Reboot)
+4. Verifique se o arquivo TOML não tem erro de sintaxe
+""")
+
 st.caption("Scraping oficial + fallback real de LLM: Gemini → Groq → OpenRouter")
 
 with st.expander("Status dos provedores configurados"):

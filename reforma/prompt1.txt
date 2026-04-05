@@ -1,0 +1,11 @@
+eu preciso criar um sistema inteligente usando o antigravity, esse sistema nasce da dor da minha sobrinha(Gabriela Simões
+
+), ela é contadora da empresa [Profissional da Área Fiscal, com experiência em toda rotina da escrituração fiscal como apuração de impostos diretos e indiretos, emissão de guias, elaboração de declarações acessórias (GIA, SPED, DCTF, REINF, DIRF, DCTFWEB, DIME, PERDCOMP, ECF, DIRBI). Conhecimento da legislação da área, atendimento ao cliente e à fiscalização, participação e aplicação de treinamentos, emissão de Certidões Negativas. Realização de fechamento de empresas do ramo do comércio, indústria e prestadores de serviços (Lucro Presumido, Lucro Real ou Simples Nacional, RET).]
+
+
+
+a dor dela: precisa entrar no site (qual eu nao sei, porém sei que é da reforma tributaria) todos os dias e rolar a pagina para ver as taulizações da reforma tributaria, que segunda ela muda todo dia praticamente. Ai ela precisa entender se houve ou nao uma nova atualização, mostrar o antes e como ficou a tualização e saber como aplicar.
+
+}
+
+eu quero automatizar para ela e enviar por email o resultado dessa rotina usando LLm para consultar , entender e entregar esse relatorio. O que ve me sugere, ?

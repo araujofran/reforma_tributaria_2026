@@ -1,5 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
+import requests
+from bs4 import BeautifulSoup
 
 # ==========================================
 # CONFIGURAÇÃO DA API (LLM) E BUSCA DINÂMICA
@@ -7,15 +9,12 @@ import google.generativeai as genai
 st.set_page_config(page_title="Assistente Fiscal - Gabriela", layout="wide")
 
 try:
-    # 1. Autenticação segura via Secrets
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     
-    # 2. Busca qual modelo está disponível e compatível com texto
     modelo_escolhido = None
     for m in genai.list_models():
         if 'generateContent' in m.supported_generation_methods:
             modelo_escolhido = m.name
-            # Dá prioridade para os modelos mais robustos
             if 'pro' in m.name.lower() or 'flash' in m.name.lower():
                 break 
 
@@ -37,34 +36,33 @@ except Exception as e:
 # ==========================================
 st.title("📊 Assistente Inteligente da Reforma Tributária")
 
-aba1, aba2, aba3 = st.tabs(["Atualizações Diárias (Web)", "Análise de XML (IBS/CBS)", "Chatbot Fiscal (Ao Vivo)"])
+aba1, aba2, aba3, aba4 = st.tabs([
+    "Radar Geral (Google)", 
+    "Análise de XML (IBS/CBS)", 
+    "Chatbot Fiscal", 
+    "Web Real (Scraping Oficial)"
+])
 
 # ------------------------------------------
-# ABA 1: ATUALIZAÇÕES COM GOOGLE SEARCH
+# ABA 1: ATUALIZAÇÕES COM GOOGLE SEARCH GROUNDING
 # ------------------------------------------
 with aba1:
-    st.header("O que mudou hoje?")
-    st.write("Consulta ao vivo as últimas notícias e leis nos portais governamentais.")
+    st.header("Radar de Atualizações (Via Google)")
+    st.write("Pesquisa nas principais fontes da internet em tempo real usando a busca do Google.")
     
-    if st.button("Buscar Atualizações de Hoje"):
-        with st.spinner("Conectando à internet para buscar as últimas portarias..."):
+    if st.button("Buscar no Google Hoje"):
+        with st.spinner("Pesquisando na web..."):
             prompt_busca = """
             Pesquise no Google as últimas atualizações sobre a Reforma Tributária no Brasil, 
             focando em regras do IBS, CBS, SPED, EFD-Reinf e DCTFWeb para o ano atual.
-            Aja como um consultor sênior resumindo as mudanças para uma contadora de Lucro Presumido e Real.
-            Seja estruturado e mostre os impactos diretos na rotina.
+            Resuma as mudanças para uma contadora de Lucro Presumido e Real.
             """
             try:
-                # Tenta gerar a resposta usando a busca em tempo real do Google
-                resposta = model.generate_content(
-                    prompt_busca,
-                    tools='google_search_retrieval' # ATIVA O GROUNDING NA WEB
-                )
+                resposta = model.generate_content(prompt_busca, tools='google_search_retrieval')
                 st.success("Relatório gerado com dados atualizados da Web!")
                 st.markdown(resposta.text)
             except Exception as e:
-                # Fallback: Se a busca web falhar (por restrição da chave), usa o conhecimento interno
-                st.warning("Nota: A busca ao vivo encontrou uma restrição de API. Utilizando a base de conhecimento interno super atualizada da IA.")
+                st.warning("Busca ao vivo restrita. Utilizando a base interna.")
                 resposta_fallback = model.generate_content(prompt_busca)
                 st.markdown(resposta_fallback.text)
 
@@ -73,29 +71,21 @@ with aba1:
 # ------------------------------------------
 with aba2:
     st.header("Análise de Impacto Tributário via XML")
-    st.write("Faça o upload do XML de uma Nota Fiscal de Serviço para verificar as regras (Lucro Presumido).")
+    st.write("Verifique a tributação de transição (IBS/CBS) subindo o arquivo da nota.")
     
     arquivo_xml = st.file_uploader("Selecione o arquivo XML", type=["xml"])
-    
     if arquivo_xml is not None:
         conteudo_xml = arquivo_xml.getvalue().decode("utf-8")
-        
-        with st.expander("Visualizar conteúdo do arquivo carregado"):
-            st.code(conteudo_xml[:1000] + "\n... [conteúdo longo truncado]", language='xml')
+        with st.expander("Visualizar XML"):
+            st.code(conteudo_xml[:1000] + "\n... [truncado]", language='xml')
             
         if st.button("Analisar Operação"):
-            with st.spinner("Cruzando dados da nota com a legislação do IVA Dual..."):
+            with st.spinner("Analisando regras do IVA Dual..."):
                 prompt_analise = f"""
-                Você é um consultor tributário sênior ajudando a Gabriela, contadora. 
-                A empresa emissora da nota abaixo é do segmento de Prestação de Serviços (Lucro Presumido).
-                
-                Analise este XML:
-                {conteudo_xml}
-                
-                Responda estritamente:
-                1. Qual o tipo de serviço prestado?
-                2. Quais impostos atuais incidem hoje nesta nota (ex: ISS, PIS, COFINS)?
-                3. Como essa exata operação será tributada na transição para o IBS e a CBS? Haverá necessidade de destaque nestes mesmos valores?
+                Você é um consultor ajudando uma contadora (Gabriela). 
+                Empresa emissora: Prestação de Serviços (Lucro Presumido).
+                Analise este XML: {conteudo_xml}
+                Responda: 1. Tipo de serviço? 2. Impostos atuais? 3. Como fica no IBS/CBS e como parametrizar?
                 """
                 try:
                     resposta_xml = model.generate_content(prompt_analise)
@@ -109,46 +99,87 @@ with aba2:
 # ------------------------------------------
 with aba3:
     st.header("💬 Tire dúvidas com a IA Fiscal")
-    st.write("Pergunte sobre regras, DCTFWeb, SPED ou como proceder em cenários específicos.")
-
-    # Inicializa o histórico de mensagens na memória do sistema
     if "mensagens" not in st.session_state:
         st.session_state.mensagens = []
 
-    # Exibe todo o histórico na tela (estilo WhatsApp/ChatGPT)
     for msg in st.session_state.mensagens:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Caixa de texto para a Gabriela digitar
-    pergunta_usuario = st.chat_input("Ex: Como fica a retenção na fonte com a chegada da CBS?")
-
+    pergunta_usuario = st.chat_input("Ex: Como fica a retenção na fonte com a CBS?")
     if pergunta_usuario:
-        # Mostra a pergunta dela na tela e salva no histórico
         st.chat_message("user").markdown(pergunta_usuario)
         st.session_state.mensagens.append({"role": "user", "content": pergunta_usuario})
 
-        with st.spinner("Analisando a legislação e buscando respostas..."):
+        with st.spinner("Buscando respostas..."):
             try:
-                contexto_gabriela = "Você é um consultor fiscal sênior auxiliando uma contadora. Dúvida direta: "
-                
+                contexto = "Atue como consultor fiscal auxiliando uma contadora. Dúvida: "
                 try:
-                    # Tenta usar a busca na web também no chat
-                    resposta_chat = model.generate_content(
-                        contexto_gabriela + pergunta_usuario,
-                        tools='google_search_retrieval'
-                    )
+                    resposta_chat = model.generate_content(contexto + pergunta_usuario, tools='google_search_retrieval')
                 except:
-                    # Se falhar, vai com a memória interna
-                    resposta_chat = model.generate_content(contexto_gabriela + pergunta_usuario)
+                    resposta_chat = model.generate_content(contexto + pergunta_usuario)
                     
-                texto_resposta = resposta_chat.text
-                
-                # Mostra a resposta da IA na tela e salva no histórico
-                with st.chat_message("assistant"):
-                    st.markdown(texto_resposta)
-                    
-                st.session_state.mensagens.append({"role": "assistant", "content": texto_resposta})
-                
+                st.chat_message("assistant").markdown(resposta_chat.text)
+                st.session_state.mensagens.append({"role": "assistant", "content": resposta_chat.text})
             except Exception as e:
                 st.error(f"Erro no chat: {e}")
+
+# ------------------------------------------
+# ABA 4: WEB REAL (WEB SCRAPING)
+# ------------------------------------------
+with aba4:
+    st.header("Monitoramento Direto (Scraping Oficial)")
+    st.write("Acessa o código HTML das páginas oficiais do Governo (Fazenda, Receita e CGIBS), extrai o texto bruto e analisa se há novas publicações normativas.")
+    
+    # Lista com os TRES sites oficiais atualizada
+    urls_oficiais = [
+        "https://www.gov.br/fazenda/pt-br/acesso-a-informacao/acoes-e-programas/reforma-tributaria",
+        "https://www.gov.br/receitafederal/pt-br/acesso-a-informacao/acoes-e-programas/programas-e-atividades/reforma-consumo",
+        "https://www.cgibs.gov.br/"
+    ]
+    
+    if st.button("Executar Web Scraping nos Portais do Governo"):
+        textos_extraidos = ""
+        
+        with st.spinner("Acessando servidores do Governo e extraindo HTML..."):
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            
+            for url in urls_oficiais:
+                try:
+                    resposta_site = requests.get(url, headers=headers, timeout=15) # Aumentei o timeout para garantir que dê tempo de ler os 3 sites
+                    
+                    if resposta_site.status_code == 200:
+                        soup = BeautifulSoup(resposta_site.content, 'html.parser')
+                        texto_limpo = soup.get_text(separator=' ', strip=True)
+                        
+                        textos_extraidos += f"\n\n--- TEXTO EXTRAÍDO DA URL: {url} ---\n"
+                        textos_extraidos += texto_limpo[:15000]
+                    else:
+                        st.warning(f"Não foi possível acessar a URL {url}. Status: {resposta_site.status_code}")
+                except Exception as erro_scraping:
+                    st.error(f"Erro ao tentar raspar a URL {url}: {erro_scraping}")
+        
+        if textos_extraidos:
+            with st.spinner("Enviando textos oficiais para leitura e interpretação da LLM..."):
+                prompt_scraping = f"""
+                Você receberá abaixo o texto bruto extraído (web scraping) hoje dos portais do Ministério da Fazenda, Receita Federal e CGIBS.
+                Analise todo o texto em busca de ATUALIZAÇÕES, MANUAIS, DATAS ou LEGISLAÇÕES sobre a Reforma Tributária.
+                Ignore partes de menu do site, rodapés ou links inúteis. 
+                Entregue um relatório apontando exclusivamente as normativas e novidades técnicas vigentes identificadas nestes textos.
+                
+                TEXTOS RASPADOS DOS SITES:
+                {textos_extraidos}
+                """
+                try:
+                    relatorio_scraping = model.generate_content(prompt_scraping)
+                    st.success("Scraping e Análise concluídos com sucesso!")
+                    
+                    with st.expander("Ver o texto bruto (HTML convertido) que o robô extraiu"):
+                        st.text(textos_extraidos[:2000] + "\n... [Texto muito longo ocultado]")
+                        
+                    st.markdown("### 🏛️ Relatório Oficial Baseado nos Portais:")
+                    st.markdown(relatorio_scraping.text)
+                except Exception as e:
+                    st.error(f"Erro na geração da IA pós-scraping: {e}")
+        else:
+            st.error("Não conseguimos extrair texto de nenhum dos portais oficiais no momento.")

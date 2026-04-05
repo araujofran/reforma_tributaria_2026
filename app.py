@@ -1,6 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 
 # ==========================================
@@ -131,7 +132,6 @@ with aba4:
     st.header("Monitoramento Direto (Scraping Oficial)")
     st.write("Acessa o código HTML das páginas oficiais do Governo (Fazenda, Receita e CGIBS), extrai o texto bruto e analisa se há novas publicações normativas.")
     
-    # Lista com os TRES sites oficiais atualizada
     urls_oficiais = [
         "https://www.gov.br/fazenda/pt-br/acesso-a-informacao/acoes-e-programas/reforma-tributaria",
         "https://www.gov.br/receitafederal/pt-br/acesso-a-informacao/acoes-e-programas/programas-e-atividades/reforma-consumo",
@@ -141,24 +141,20 @@ with aba4:
     if st.button("Executar Web Scraping nos Portais do Governo"):
         textos_extraidos = ""
         
-        with st.spinner("Acessando servidores do Governo e extraindo HTML..."):
-            # Disfarce avançado para evitar bloqueios de firewalls e anti-bots (ex: CGIBS)
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1'
-            }
+        with st.spinner("Ativando Cloudscraper antibloqueio e acessando servidores..."):
+            # Cria o scraper especializado em pular firewalls de segurança (como o do CGIBS)
+            scraper = cloudscraper.create_scraper(
+                browser={
+                    'browser': 'chrome',
+                    'platform': 'windows',
+                    'desktop': True
+                }
+            )
             
             for url in urls_oficiais:
                 try:
-                    resposta_site = requests.get(url, headers=headers, timeout=15) 
+                    # Usamos o scraper em vez do 'requests'
+                    resposta_site = scraper.get(url, timeout=20) 
                     
                     if resposta_site.status_code == 200:
                         soup = BeautifulSoup(resposta_site.content, 'html.parser')

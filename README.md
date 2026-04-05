@@ -94,13 +94,10 @@ GEMINI_API_KEY = "sua_chave_aqui"
 Projeto desenvolvido por **Francisco Ferreira de Araujo** com foco em inovação fiscal e apoio à classe contábil na Reforma Tributária 2026.
 
 📱 (11) 95739-7660
+
 💼 https://www.linkedin.com/in/francisco-ferreira-de-araujo-1b432033/
+
 💻 https://github.com/araujofran
 
 ```
 
----
-
-
-
-Quer que eu também monte um **requirements.txt** com as bibliotecas necessárias para rodar seu projeto (Streamlit e Google Generative AI)?

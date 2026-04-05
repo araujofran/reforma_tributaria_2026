@@ -1,0 +1,7 @@
+secrets.toml 
+reforma/*.txt 
+venv/ 
+.env/ 
+*.log 
+*.tmp 
+*.swp 

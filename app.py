@@ -5,18 +5,19 @@ import json
 import random
 import hashlib
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 import streamlit as st
 import google.generativeai as genai
 from bs4 import BeautifulSoup
 from curl_cffi import requests as requests_cffi
-import requests
 
 # =========================================================
 # CONFIGURAÇÃO GERAL
 # =========================================================
 st.set_page_config(
-    page_title="Assistente Fiscal - Gabriela",
+    page_title="Assistente Fiscal - Gabriela | V3",
     layout="wide"
 )
 
@@ -24,7 +25,7 @@ PASTA_CACHE = "cache_scraping"
 ARQUIVO_ULTIMA_EXECUCAO = os.path.join(PASTA_CACHE, "ultima_execucao.json")
 os.makedirs(PASTA_CACHE, exist_ok=True)
 
-HEADERS = {
+HEADERS_WEB = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -52,13 +53,29 @@ URLS_OFICIAIS = [
 ]
 
 # =========================================================
+# SECRETS / MODELOS
+# =========================================================
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "")
+
+# Modelos default. Você pode trocar nos secrets se quiser.
+GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
+GROQ_MODEL = st.secrets.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+OPENROUTER_MODEL = st.secrets.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+
+# OpenRouter recomenda headers opcionais para identificação do app
+OPENROUTER_APP_NAME = st.secrets.get("OPENROUTER_APP_NAME", "Assistente Fiscal Gabriela")
+OPENROUTER_APP_URL = st.secrets.get("OPENROUTER_APP_URL", "https://localhost")
+
+# =========================================================
 # FUNÇÕES AUXILIARES - DATA / JSON / HASH
 # =========================================================
-def agora_str():
+def agora_str() -> str:
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 
-def agora_arquivo():
+def agora_arquivo() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
@@ -79,38 +96,27 @@ def gerar_hash_texto(texto: str) -> str:
 
 
 # =========================================================
-# FUNÇÕES AUXILIARES - GEMINI
+# CONFIGURAÇÃO GEMINI
 # =========================================================
-def configurar_modelo():
+def configurar_gemini():
+    if not GEMINI_API_KEY:
+        return None, None
+
     try:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-
-        modelo_escolhido = None
-        for m in genai.list_models():
-            if "generateContent" in m.supported_generation_methods:
-                modelo_escolhido = m.name
-                if "pro" in m.name.lower() or "flash" in m.name.lower():
-                    break
-
-        if modelo_escolhido:
-            return genai.GenerativeModel(modelo_escolhido)
-        else:
-            st.error("ERRO: Nenhum modelo disponível para esta chave de API.")
-            st.stop()
-
-    except KeyError:
-        st.error("ERRO: A variável 'GEMINI_API_KEY' não foi encontrada nos Secrets do Streamlit.")
-        st.stop()
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        return model, GEMINI_MODEL
     except Exception as e:
-        st.error(f"ERRO DE CONEXÃO COM A API: {e}")
-        st.stop()
+        st.warning(f"Gemini indisponível no carregamento: {e}")
+        return None, None
 
 
+gemini_model, gemini_model_name = configurar_gemini()
+
+# =========================================================
+# FUNÇÕES AUXILIARES - ERROS / RETRY
+# =========================================================
 def extrair_retry_seconds(mensagem_erro: str, default: int = 35) -> int:
-    """
-    Tenta extrair o tempo de retry a partir da mensagem da API.
-    Ex.: 'Please retry in 32.867444365s'
-    """
     try:
         padrao = r"retry in\s+([0-9]+(?:\.[0-9]+)?)s"
         match = re.search(padrao, mensagem_erro, re.IGNORECASE)
@@ -131,36 +137,6 @@ def eh_erro_quota_429(erro: Exception) -> bool:
     )
 
 
-def gerar_com_retry(model, prompt: str, usar_google_search: bool = False, max_tentativas: int = 3):
-    """
-    Faz generate_content com retry automático para erro 429 / quota.
-    """
-    ultimo_erro = None
-
-    for tentativa in range(1, max_tentativas + 1):
-        try:
-            if usar_google_search:
-                return model.generate_content(prompt, tools="google_search_retrieval")
-            return model.generate_content(prompt)
-
-        except Exception as e:
-            ultimo_erro = e
-
-            if eh_erro_quota_429(e) and tentativa < max_tentativas:
-                espera = extrair_retry_seconds(str(e), default=35)
-                espera += random.randint(1, 3)
-
-                with st.spinner(
-                    f"Cota temporariamente excedida. Aguardando {espera}s para tentar novamente "
-                    f"({tentativa}/{max_tentativas})..."
-                ):
-                    time.sleep(espera)
-            else:
-                raise ultimo_erro
-
-    raise ultimo_erro
-
-
 # =========================================================
 # FUNÇÕES AUXILIARES - SCRAPING
 # =========================================================
@@ -168,7 +144,7 @@ def baixar_html_com_curl_cffi(url: str) -> str:
     sess = requests_cffi.Session()
     resp = sess.get(
         url,
-        headers=HEADERS,
+        headers=HEADERS_WEB,
         impersonate="chrome",
         timeout=30,
         allow_redirects=True,
@@ -181,7 +157,7 @@ def baixar_html_com_curl_cffi(url: str) -> str:
 def baixar_html_com_requests(url: str) -> str:
     resp = requests.get(
         url,
-        headers=HEADERS,
+        headers=HEADERS_WEB,
         timeout=30,
         allow_redirects=True,
     )
@@ -229,24 +205,21 @@ def extrair_texto_da_url(url: str, limite_chars: int = 18000) -> str:
     return texto[:limite_chars]
 
 
-def coletar_portal(nome: str, url: str):
+def coletar_portal(nome: str, url: str) -> Dict[str, str]:
     texto = extrair_texto_da_url(url)
-    hash_texto = gerar_hash_texto(texto)
-    timestamp = agora_str()
-
     return {
         "nome": nome,
         "url": url,
         "texto": texto,
-        "hash": hash_texto,
-        "coletado_em": timestamp
+        "hash": gerar_hash_texto(texto),
+        "coletado_em": agora_str()
     }
 
 
 # =========================================================
 # FUNÇÕES AUXILIARES - COMPARAÇÃO
 # =========================================================
-def segmentar_texto_em_blocos(texto: str, tamanho_bloco: int = 1200):
+def segmentar_texto_em_blocos(texto: str, tamanho_bloco: int = 1200) -> List[str]:
     palavras = texto.split()
     blocos = []
     atual = []
@@ -263,7 +236,7 @@ def segmentar_texto_em_blocos(texto: str, tamanho_bloco: int = 1200):
     return blocos
 
 
-def comparar_textos_textualmente(texto_antigo: str, texto_novo: str, max_novidades: int = 20):
+def comparar_textos_textualmente(texto_antigo: str, texto_novo: str, max_novidades: int = 20) -> Dict[str, Any]:
     if not texto_antigo:
         return {
             "novidades": ["Primeira execução registrada; não há base anterior para comparação."],
@@ -294,18 +267,16 @@ def gerar_prompt_chat_oficial(pergunta_usuario: str) -> str:
 Atue como um consultor fiscal sênior auxiliando a contadora Gabriela.
 
 REGRA ABSOLUTA:
-Para responder à dúvida abaixo, você é OBRIGADO a pesquisar na internet e basear sua resposta APENAS nos dados encontrados nestes três sites exatos:
-
-1. site:gov.br/fazenda/pt-br/acesso-a-informacao/acoes-e-programas/reforma-tributaria
-2. site:cgibs.gov.br
-3. site:gov.br/receitafederal/pt-br/acesso-a-informacao/acoes-e-programas/programas-e-atividades/reforma-consumo
+Para responder à dúvida abaixo, você deve se basear apenas em informações desses três portais oficiais:
+1. gov.br/fazenda/pt-br/acesso-a-informacao/acoes-e-programas/reforma-tributaria
+2. cgibs.gov.br
+3. gov.br/receitafederal/pt-br/acesso-a-informacao/acoes-e-programas/programas-e-atividades/reforma-consumo
 
 REGRAS DE RESPOSTA:
-- Não use conhecimento prévio.
-- Não use fontes diferentes desses três portais.
-- Se a informação não existir nesses três sites, diga exatamente:
-  "Não encontrei essa informação nas atualizações oficiais de hoje dos portais do Governo."
-- Sempre que possível, mencione em qual dos três portais a resposta foi encontrada.
+- Não use conhecimento prévio fora desses portais.
+- Se a informação não existir nesses três sites, diga:
+  "Não encontrei essa informação nas atualizações oficiais dos portais do Governo."
+- Sempre que possível, mencione em qual portal a resposta foi encontrada.
 - Responda de forma técnica, objetiva e útil para uma contadora.
 - Se houver divergência entre portais, informe isso claramente.
 - Priorize publicações normativas, comunicados, manuais, guias, datas de implantação e orientações operacionais.
@@ -382,13 +353,13 @@ FORMATO OBRIGATÓRIO:
 
 
 # =========================================================
-# FUNÇÕES AUXILIARES - FALLBACK SEM IA
+# FALLBACK SEM IA
 # =========================================================
 def montar_relatorio_fallback_sem_ia(dados_portais: list, comparacoes: dict) -> str:
     linhas = []
     linhas.append("## Relatório emergencial sem IA")
     linhas.append("")
-    linhas.append("A análise por IA não pôde ser concluída neste momento por limite de cota da API.")
+    linhas.append("A análise por IA não pôde ser concluída neste momento.")
     linhas.append("Abaixo está um resumo operacional baseado apenas na coleta e comparação textual.")
     linhas.append("")
 
@@ -413,18 +384,135 @@ def montar_relatorio_fallback_sem_ia(dados_portais: list, comparacoes: dict) -> 
         linhas.append("")
 
     linhas.append("### Recomendação")
-    linhas.append("- Reexecute a análise após a janela de retry da API ou use uma chave/projeto com cota superior.")
+    linhas.append("- Reexecute a análise depois ou valide suas chaves/provedores alternativos.")
 
     return "\n".join(linhas)
 
 
 # =========================================================
-# FUNÇÕES AUXILIARES - EXPORTAÇÃO
+# CLIENTES LLM - GROQ / OPENROUTER
 # =========================================================
-def montar_texto_exportacao_relatorio(relatorio_ia: str, dados_portais: list, comparacoes: dict) -> str:
+def chamar_groq_chat(prompt: str, temperature: float = 0.2, max_tokens: int = 2500) -> str:
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY não configurada.")
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": "Você é um consultor fiscal técnico, objetivo e confiável."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=90)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Groq retornou {resp.status_code}: {resp.text[:1000]}")
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
+
+
+def chamar_openrouter_chat(prompt: str, temperature: float = 0.2, max_tokens: int = 2500) -> str:
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY não configurada.")
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": OPENROUTER_APP_URL,
+        "X-Title": OPENROUTER_APP_NAME,
+    }
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": "Você é um consultor fiscal técnico, objetivo e confiável."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=90)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"OpenRouter retornou {resp.status_code}: {resp.text[:1000]}")
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
+
+
+def chamar_gemini(prompt: str, usar_google_search: bool = False):
+    if not gemini_model:
+        raise RuntimeError("Gemini não configurado.")
+    if usar_google_search:
+        return gemini_model.generate_content(prompt, tools="google_search_retrieval")
+    return gemini_model.generate_content(prompt)
+
+
+def gerar_texto_com_fallback(
+    prompt: str,
+    usar_google_search_no_gemini: bool = False,
+    max_tentativas_gemini: int = 3
+) -> Tuple[str, str]:
+    """
+    Retorna (texto, provedor_usado)
+    Ordem:
+    1. Gemini
+    2. Groq
+    3. OpenRouter
+    """
+    # 1) GEMINI
+    if gemini_model:
+        ultimo_erro_gemini = None
+        for tentativa in range(1, max_tentativas_gemini + 1):
+            try:
+                resposta = chamar_gemini(prompt, usar_google_search=usar_google_search_no_gemini)
+                texto = getattr(resposta, "text", None)
+                if not texto:
+                    raise RuntimeError("Gemini não retornou texto utilizável.")
+                return texto, f"Gemini ({GEMINI_MODEL})"
+            except Exception as e:
+                ultimo_erro_gemini = e
+                if eh_erro_quota_429(e) and tentativa < max_tentativas_gemini:
+                    espera = extrair_retry_seconds(str(e), default=35) + random.randint(1, 3)
+                    with st.spinner(f"Gemini com cota temporariamente excedida. Aguardando {espera}s para retry ({tentativa}/{max_tentativas_gemini})..."):
+                        time.sleep(espera)
+                else:
+                    break
+        st.warning(f"Gemini indisponível nesta tentativa: {ultimo_erro_gemini}")
+
+    # 2) GROQ
+    if GROQ_API_KEY:
+        try:
+            texto = chamar_groq_chat(prompt)
+            return texto, f"Groq ({GROQ_MODEL})"
+        except Exception as e:
+            st.warning(f"Groq indisponível nesta tentativa: {e}")
+
+    # 3) OPENROUTER
+    if OPENROUTER_API_KEY:
+        try:
+            texto = chamar_openrouter_chat(prompt)
+            return texto, f"OpenRouter ({OPENROUTER_MODEL})"
+        except Exception as e:
+            st.warning(f"OpenRouter indisponível nesta tentativa: {e}")
+
+    raise RuntimeError("Nenhum provedor LLM disponível no momento. Verifique GEMINI_API_KEY, GROQ_API_KEY e OPENROUTER_API_KEY.")
+
+
+# =========================================================
+# EXPORTAÇÃO
+# =========================================================
+def montar_texto_exportacao_relatorio(relatorio_ia: str, dados_portais: list, comparacoes: dict, provider_info: str) -> str:
     linhas = []
     linhas.append("RELATÓRIO DE MONITORAMENTO OFICIAL - REFORMA TRIBUTÁRIA")
     linhas.append(f"Gerado em: {agora_str()}")
+    linhas.append(f"LLM utilizada: {provider_info}")
     linhas.append("=" * 80)
     linhas.append("")
     linhas.append("RELATÓRIO")
@@ -455,10 +543,11 @@ def montar_texto_exportacao_relatorio(relatorio_ia: str, dados_portais: list, co
     return "\n".join(linhas)
 
 
-def montar_markdown_exportacao(relatorio_ia: str, dados_portais: list, comparacoes: dict) -> str:
+def montar_markdown_exportacao(relatorio_ia: str, dados_portais: list, comparacoes: dict, provider_info: str) -> str:
     md = []
     md.append("# Relatório de Monitoramento Oficial - Reforma Tributária")
-    md.append(f"**Gerado em:** {agora_str()}\n")
+    md.append(f"**Gerado em:** {agora_str()}")
+    md.append(f"**LLM utilizada:** {provider_info}\n")
     md.append("## Relatório")
     md.append(relatorio_ia)
     md.append("\n## Resumo de comparação por portal")
@@ -483,9 +572,10 @@ def montar_markdown_exportacao(relatorio_ia: str, dados_portais: list, comparaco
     return "\n".join(md)
 
 
-def salvar_execucao_atual(dados_portais: list, comparacoes: dict, relatorio_ia: str):
+def salvar_execucao_atual(dados_portais: list, comparacoes: dict, relatorio_ia: str, provider_info: str):
     payload = {
         "gerado_em": agora_str(),
+        "provider_info": provider_info,
         "dados_portais": dados_portais,
         "comparacoes": comparacoes,
         "relatorio_ia": relatorio_ia
@@ -499,69 +589,57 @@ def salvar_execucao_atual(dados_portais: list, comparacoes: dict, relatorio_ia: 
 
 
 # =========================================================
-# MODELO
-# =========================================================
-model = configurar_modelo()
-
-# =========================================================
 # INTERFACE
 # =========================================================
-st.title("📊 Assistente Inteligente da Reforma Tributária")
-st.caption("Monitoramento oficial focado em Ministério da Fazenda, Receita Federal e CGIBS.")
+st.title("📊 Assistente Inteligente da Reforma Tributária — V3")
+st.caption("Scraping oficial + fallback real de LLM: Gemini → Groq → OpenRouter")
+
+with st.expander("Status dos provedores configurados"):
+    st.write(f"Gemini: {'✅ configurado' if GEMINI_API_KEY else '❌ ausente'}")
+    st.write(f"Groq: {'✅ configurado' if GROQ_API_KEY else '❌ ausente'}")
+    st.write(f"OpenRouter: {'✅ configurado' if OPENROUTER_API_KEY else '❌ ausente'}")
+    st.write(f"Modelo Gemini: {GEMINI_MODEL}")
+    st.write(f"Modelo Groq: {GROQ_MODEL}")
+    st.write(f"Modelo OpenRouter: {OPENROUTER_MODEL}")
 
 aba1, aba2, aba3, aba4 = st.tabs([
-    "Radar Geral (Google)",
-    "Análise de XML (IBS/CBS)",
+    "Radar Geral",
+    "Análise de XML",
     "Chatbot Fiscal (Oficial)",
-    "Web Real V2 (Scraping Oficial)"
+    "Web Real V3"
 ])
 
 # =========================================================
 # ABA 1 - RADAR GERAL
 # =========================================================
 with aba1:
-    st.header("Radar de Atualizações (Via Google)")
-    st.write("Pesquisa ampla na internet em tempo real.")
+    st.header("Radar de Atualizações")
+    st.write("Usa Gemini com busca quando possível; se falhar, cai para outros provedores.")
 
-    if st.button("Buscar no Google Hoje"):
-        with st.spinner("Pesquisando na web..."):
-            prompt_busca = """
-Pesquise no Google as últimas atualizações sobre a Reforma Tributária no Brasil,
-focando em IBS, CBS, SPED, EFD-Reinf e DCTFWeb para o ano atual.
-Resuma as mudanças para uma contadora de Lucro Presumido e Real.
+    if st.button("Buscar panorama do dia"):
+        prompt_busca = """
+Pesquise e resuma as últimas atualizações sobre a Reforma Tributária no Brasil,
+com foco em IBS, CBS, SPED, EFD-Reinf e DCTFWeb.
+Escreva para uma contadora de Lucro Presumido e Lucro Real.
 """
+        with st.spinner("Consultando LLMs..."):
             try:
-                resposta = gerar_com_retry(
-                    model,
+                texto, provider_info = gerar_texto_com_fallback(
                     prompt_busca,
-                    usar_google_search=True,
-                    max_tentativas=3
+                    usar_google_search_no_gemini=True,
+                    max_tentativas_gemini=3
                 )
-                st.success("Relatório gerado com dados atualizados da Web!")
-                st.markdown(resposta.text)
-
-            except Exception:
-                try:
-                    resposta = gerar_com_retry(
-                        model,
-                        prompt_busca,
-                        usar_google_search=False,
-                        max_tentativas=2
-                    )
-                    st.warning("Busca ao vivo indisponível. Utilizando resposta sem grounding.")
-                    st.markdown(resposta.text)
-                except Exception as e:
-                    if eh_erro_quota_429(e):
-                        st.error("A cota da API Gemini foi excedida. Aguarde um pouco e tente novamente.")
-                    else:
-                        st.error(f"Erro ao consultar a IA: {e}")
+                st.success(f"Resposta gerada com: {provider_info}")
+                st.markdown(texto)
+            except Exception as e:
+                st.error(f"Erro ao consultar os provedores: {e}")
 
 # =========================================================
-# ABA 2 - ANÁLISE DE XML
+# ABA 2 - XML
 # =========================================================
 with aba2:
     st.header("Análise de Impacto Tributário via XML")
-    st.write("Verifique a tributação de transição (IBS/CBS) com upload do XML.")
+    st.write("Analisa o XML com fallback de provedores.")
 
     arquivo_xml = st.file_uploader("Selecione o arquivo XML", type=["xml"])
 
@@ -572,8 +650,7 @@ with aba2:
             st.code(conteudo_xml[:1500] + "\n... [truncado]", language="xml")
 
         if st.button("Analisar Operação"):
-            with st.spinner("Analisando XML..."):
-                prompt_analise = f"""
+            prompt_analise = f"""
 Você é um consultor tributário auxiliando a contadora Gabriela.
 
 Contexto:
@@ -590,89 +667,71 @@ Analise o XML abaixo e responda:
 XML:
 {conteudo_xml}
 """
+            with st.spinner("Analisando XML..."):
                 try:
-                    resposta_xml = gerar_com_retry(
-                        model,
-                        prompt_analise,
-                        usar_google_search=False,
-                        max_tentativas=3
-                    )
-                    st.success("Análise concluída!")
-                    st.markdown(resposta_xml.text)
+                    texto, provider_info = gerar_texto_com_fallback(prompt_analise)
+                    st.success(f"Análise gerada com: {provider_info}")
+                    st.markdown(texto)
                 except Exception as e:
-                    if eh_erro_quota_429(e):
-                        st.error("A cota da API Gemini foi excedida. Aguarde um pouco e tente novamente.")
-                    else:
-                        st.error(f"Erro ao analisar o XML: {e}")
+                    st.error(f"Erro ao analisar XML: {e}")
 
 # =========================================================
 # ABA 3 - CHAT OFICIAL
 # =========================================================
 with aba3:
-    st.header("💬 Tire dúvidas com a IA Fiscal (Fontes Oficiais)")
-    st.write("Respostas baseadas estritamente no Ministério da Fazenda, Receita Federal e CGIBS.")
+    st.header("💬 Chatbot Fiscal (Fontes Oficiais)")
+    st.write("Prioriza Gemini com busca. Se falhar, tenta Groq e OpenRouter com o mesmo prompt restritivo.")
 
-    if "mensagens_chat_oficial" not in st.session_state:
-        st.session_state.mensagens_chat_oficial = []
+    if "mensagens_chat_oficial_v3" not in st.session_state:
+        st.session_state.mensagens_chat_oficial_v3 = []
 
-    for msg in st.session_state.mensagens_chat_oficial:
+    for msg in st.session_state.mensagens_chat_oficial_v3:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
     pergunta_usuario = st.chat_input(
         "Ex: Quais as novas regras de transição publicadas hoje?",
-        key="chat_oficial"
+        key="chat_oficial_v3"
     )
 
     if pergunta_usuario:
         st.chat_message("user").markdown(pergunta_usuario)
-        st.session_state.mensagens_chat_oficial.append({"role": "user", "content": pergunta_usuario})
+        st.session_state.mensagens_chat_oficial_v3.append({
+            "role": "user",
+            "content": pergunta_usuario
+        })
 
-        with st.spinner("Consultando os 3 portais oficiais do governo em tempo real..."):
+        prompt_chat = gerar_prompt_chat_oficial(pergunta_usuario)
+
+        with st.spinner("Consultando provedores..."):
             try:
-                prompt_chat = gerar_prompt_chat_oficial(pergunta_usuario)
-
-                try:
-                    resposta_chat = gerar_com_retry(
-                        model,
-                        prompt_chat,
-                        usar_google_search=True,
-                        max_tentativas=3
-                    )
-                except Exception:
-                    resposta_chat = gerar_com_retry(
-                        model,
-                        prompt_chat,
-                        usar_google_search=False,
-                        max_tentativas=2
-                    )
-
-                st.chat_message("assistant").markdown(resposta_chat.text)
-                st.session_state.mensagens_chat_oficial.append(
-                    {"role": "assistant", "content": resposta_chat.text}
+                texto, provider_info = gerar_texto_com_fallback(
+                    prompt_chat,
+                    usar_google_search_no_gemini=True,
+                    max_tentativas_gemini=3
                 )
-
+                resposta_final = f"**Fonte de geração:** {provider_info}\n\n{texto}"
+                st.chat_message("assistant").markdown(resposta_final)
+                st.session_state.mensagens_chat_oficial_v3.append({
+                    "role": "assistant",
+                    "content": resposta_final
+                })
             except Exception as e:
-                if eh_erro_quota_429(e):
-                    st.error("A cota da API Gemini foi excedida no momento. Aguarde um pouco e tente novamente.")
-                else:
-                    st.error(f"Erro no chat oficial: {e}")
+                st.error(f"Erro no chat oficial: {e}")
 
 # =========================================================
-# ABA 4 - WEB REAL V2
+# ABA 4 - WEB REAL V3
 # =========================================================
 with aba4:
-    st.header("🏛️ Web Real V2 (Scraping Oficial)")
+    st.header("🏛️ Web Real V3")
     st.write(
         "Coleta HTML dos portais oficiais, extrai texto, compara com a última execução, "
-        "destaca novidades e gera relatório exportável."
+        "e gera relatório com fallback real: Gemini → Groq → OpenRouter."
     )
 
     col1, col2 = st.columns(2)
-
     with col1:
-        executar_scraping = st.button("Executar Monitoramento Oficial V2")
-
+        executar_scraping = st.button("Executar Monitoramento Oficial V3")
     with col2:
         mostrar_ultima = st.button("Ver Última Execução Salva")
 
@@ -680,6 +739,7 @@ with aba4:
         ultima = ler_json(ARQUIVO_ULTIMA_EXECUCAO)
         if ultima:
             st.info(f"Última execução encontrada: {ultima.get('gerado_em', 'N/A')}")
+            st.write(f"LLM usada na última execução: {ultima.get('provider_info', 'N/A')}")
             with st.expander("Abrir relatório da última execução"):
                 st.markdown(ultima.get("relatorio_ia", "Sem relatório salvo."))
         else:
@@ -689,6 +749,8 @@ with aba4:
         dados_portais = []
         comparacoes = {}
         falhas = []
+        provider_info = "Nenhuma"
+        texto_relatorio_final = ""
 
         ultima_execucao = ler_json(ARQUIVO_ULTIMA_EXECUCAO)
         mapa_anterior = {}
@@ -716,13 +778,9 @@ with aba4:
                     comparacoes[nome] = comparacao
 
                     st.toast(f"✅ Coleta concluída: {nome}")
-
                 except Exception as e:
                     falhas.append({"portal": nome, "url": url, "erro": str(e)})
-                    comparacoes[nome] = {
-                        "novidades": [],
-                        "quantidade_novidades": 0
-                    }
+                    comparacoes[nome] = {"novidades": [], "quantidade_novidades": 0}
                     st.warning(f"Falha ao acessar {nome}")
 
         if falhas:
@@ -735,34 +793,24 @@ with aba4:
                     )
 
         if dados_portais:
-            with st.spinner("Gerando relatório analítico com base nos textos oficiais..."):
+            prompt_relatorio = gerar_prompt_relatorio_scraping(dados_portais, comparacoes)
+
+            with st.spinner("Gerando relatório analítico..."):
                 try:
-                    prompt_relatorio = gerar_prompt_relatorio_scraping(dados_portais, comparacoes)
-
-                    relatorio = gerar_com_retry(
-                        model,
+                    texto_relatorio_final, provider_info = gerar_texto_com_fallback(
                         prompt_relatorio,
-                        usar_google_search=False,
-                        max_tentativas=3
+                        usar_google_search_no_gemini=False,
+                        max_tentativas_gemini=3
                     )
-
-                    texto_relatorio_final = relatorio.text
-                    st.success("Scraping e análise concluídos com sucesso!")
+                    st.success(f"Relatório gerado com: {provider_info}")
                     st.markdown("## Relatório Executivo")
                     st.markdown(texto_relatorio_final)
 
                 except Exception as e:
-                    if eh_erro_quota_429(e):
-                        st.warning(
-                            "A IA não pôde concluir a análise porque a cota da API foi excedida. "
-                            "Vou exibir um relatório emergencial sem IA."
-                        )
-                        texto_relatorio_final = montar_relatorio_fallback_sem_ia(dados_portais, comparacoes)
-                        st.markdown(texto_relatorio_final)
-                    else:
-                        st.error(f"Erro ao gerar relatório da IA: {e}")
-                        texto_relatorio_final = montar_relatorio_fallback_sem_ia(dados_portais, comparacoes)
-                        st.markdown(texto_relatorio_final)
+                    st.warning(f"Não foi possível gerar com LLM. Motivo: {e}")
+                    provider_info = "Fallback sem IA"
+                    texto_relatorio_final = montar_relatorio_fallback_sem_ia(dados_portais, comparacoes)
+                    st.markdown(texto_relatorio_final)
 
             st.markdown("## Painel de Novidades Detectadas")
             for nome_portal, comp in comparacoes.items():
@@ -782,12 +830,14 @@ with aba4:
             txt_export = montar_texto_exportacao_relatorio(
                 texto_relatorio_final,
                 dados_portais,
-                comparacoes
+                comparacoes,
+                provider_info
             )
             md_export = montar_markdown_exportacao(
                 texto_relatorio_final,
                 dados_portais,
-                comparacoes
+                comparacoes,
+                provider_info
             )
 
             st.download_button(
@@ -804,8 +854,7 @@ with aba4:
                 mime="text/markdown"
             )
 
-            salvar_execucao_atual(dados_portais, comparacoes, texto_relatorio_final)
+            salvar_execucao_atual(dados_portais, comparacoes, texto_relatorio_final, provider_info)
             st.info("Execução salva com sucesso para comparações futuras.")
-
         else:
             st.error("Não foi possível extrair texto de nenhum dos portais oficiais no momento.")

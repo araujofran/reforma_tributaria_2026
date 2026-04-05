@@ -9,7 +9,7 @@ import google.generativeai as genai
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     # Usando o modelo flash, que é rápido e excelente para análise de texto/XML
-    model = genai.GenerativeModel('gemini-1.5-flash-latest') 
+    model = genai.GenerativeModel('gemini-pro') 
 except Exception as e:
     st.warning("API Key não configurada. Configure no Streamlit Secrets.")
 

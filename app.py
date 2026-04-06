@@ -442,6 +442,72 @@ def buscar_noticias_por_palavra_chave(palavra_chave: str) -> List[Dict[str, str]
     return noticias_relevantes
 
 
+def buscar_noticia_na_web(palavra_chave: str, max_resultados: int = 3) -> List[Dict[str, str]]:
+    """Busca notícias na web usando Google (gratuitamente)"""
+    resultados = []
+    
+    query = f"Reforma Tributária {palavra_chave} gov.br Receita Federal 2026"
+    
+    try:
+        url_busca = "https://www.google.com/search"
+        params = {
+            "q": query,
+            "num": max_resultados * 2,
+            "hl": "pt-BR"
+        }
+        headers_busca = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "pt-BR,pt;q=0.9"
+        }
+        
+        response = requests.get(url_busca, params=params, headers=headers_busca, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        for item in soup.find_all("div", class_="BNeawe")[:max_resultados]:
+            link_tag = item.find("a")
+            if link_tag:
+                href = link_tag.get("href", "")
+                if "/url?" in href:
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = parse_qs(urlparse(href).query)
+                    url_final = parsed.get("q", [href])[0]
+                    if "gov.br" in url_final and "noticia" in url_final:
+                        titulo = item.get_text(strip=True)[:100]
+                        resultados.append({
+                            "titulo": titulo,
+                            "url": url_final,
+                            "data": "",
+                            "conteudo": "",
+                            "nome_fonte": "Busca Web"
+                        })
+    except Exception as e:
+        pass
+    
+    return resultados
+
+
+def buscar_conteudo_noticia_completo(url: str) -> str:
+    """Tenta buscar conteúdo completo de uma notícia"""
+    try:
+        html = baixar_html(url)
+        texto = limpar_html_para_texto(html)
+        if len(texto) > 500:
+            return texto[:8000]
+    except:
+        pass
+    
+    try:
+        from urllib.parse import urlparse
+        dominio = urlparse(url).netloc
+        if "gov.br" in dominio:
+            return f"Notícia disponível em: {url}"
+    except:
+        pass
+    
+    return ""
+
+
 # =========================================================
 # COMPARAÇÃO
 # =========================================================
@@ -989,9 +1055,17 @@ def responder_chat_oficial_inteligente(pergunta_usuario: str) -> Tuple[str, str,
     # Se detectou palavra-chave específica, buscar conteúdo completo das notícias
     if palavras_busca:
         noticias_encontradas = []
+        
+        # Primeiro tenta scraping local
         for palavra in palavras_busca:
             noticias = buscar_noticias_por_palavra_chave(palavra)
             noticias_encontradas.extend(noticias)
+        
+        # Se não encontrou conteúdo, tenta busca na web
+        if not noticias_encontradas or all(len(n.get('conteudo', '')) < 200 for n in noticias_encontradas):
+            for palavra in palavras_busca:
+                noticias_web = buscar_noticia_na_web(palavra)
+                noticias_encontradas.extend(noticias_web)
         
         if noticias_encontradas:
             contexto_noticias = []

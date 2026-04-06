@@ -52,6 +52,17 @@ URLS_OFICIAIS = [
     }
 ]
 
+URLS_NOTICIAS = [
+    {
+        "nome": "Ministério da Fazenda - Notícias Reforma Tributária",
+        "url": "https://www.gov.br/fazenda/pt-br/assuntos/noticias"
+    },
+    {
+        "nome": "Receita Federal - Notícias 2026",
+        "url": "https://www.gov.br/receitafederal/pt-br/assuntos/noticias/2026"
+    }
+]
+
 # =========================================================
 # SECRETS / MODELOS
 # =========================================================
@@ -244,8 +255,17 @@ def extrair_texto_da_url(url: str, limite_chars: int = 18000) -> str:
     return texto[:limite_chars]
 
 
-def coletar_portal(nome: str, url: str) -> Dict[str, str]:
-    texto = extrair_texto_da_url(url)
+def extrair_noticias_da_url(url: str, limite_chars: int = 12000) -> str:
+    html = baixar_html(url)
+    texto = limpar_html_foco_noticias(html)
+    return texto[:limite_chars]
+
+
+def coletar_portal(nome: str, url: str, eh_noticia: bool = False) -> Dict[str, str]:
+    if eh_noticia:
+        texto = extrair_noticias_da_url(url)
+    else:
+        texto = extrair_texto_da_url(url)
     return {
         "nome": nome,
         "url": url,
@@ -269,6 +289,48 @@ def coletar_todos_portais() -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]
             falhas.append({"portal": nome, "url": url, "erro": str(e)})
 
     return dados_portais, falhas
+
+
+def coletar_noticias() -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    dados_noticias = []
+    falhas = []
+
+    for portal in URLS_NOTICIAS:
+        nome = portal["nome"]
+        url = portal["url"]
+        try:
+            item = coletar_portal(nome, url, eh_noticia=True)
+            dados_noticias.append(item)
+        except Exception as e:
+            falhas.append({"portal": nome, "url": url, "erro": str(e)})
+
+    return dados_noticias, falhas
+
+
+def limpar_html_foco_noticias(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup(["script", "style", "noscript", "svg", "img", "header", "footer", "nav", "form", "button", "aside"]):
+        tag.decompose()
+
+    noticias_encontradas = []
+    for link in soup.find_all("a"):
+        texto = link.get_text(strip=True)
+        href = link.get("href", "")
+        if texto and len(texto) > 30 and href:
+            noticias_encontradas.append(f"TÍTULO: {texto} | URL: {href}")
+
+    for tag in soup.find_all(["div", "section", "article"]):
+        tag.decompose()
+
+    texto = soup.get_text(separator=" | ", strip=True)
+    texto = re.sub(r"\s+", " ", texto).strip()
+
+    if noticias_encontradas:
+        noticias_formatadas = "\n".join(noticias_encontradas[:15])
+        texto = f"LISTA DE NOTÍCIAS:\n{noticias_formatadas}\n\nCONTEÚDO ADICIONAL:\n{texto[:10000]}"
+
+    return texto[:15000]
 
 
 # =========================================================
@@ -357,23 +419,26 @@ TEXTO:
     return f"""
 Você é um consultor fiscal sênior auxiliando a contadora Gabriela.
 
-RESPONDA APENAS com base nos textos extraídos destes 3 portais oficiais:
-1. Ministério da Fazenda
-2. Receita Federal
-3. CGIBS
+RESPONDA com base nos textos extraídos dos portais oficiais do Governo Federal sobre Reforma Tributária.
 
-REGRAS:
-- Não use conhecimento prévio fora do texto fornecido
-- Se a resposta não estiver nos textos, diga:
-  "Não encontrei essa informação nos textos oficiais coletados agora."
-- Sempre diga em qual portal encontrou a informação
-- Responda de forma técnica, objetiva e útil
-- Ignore menus e navegação do site
+FONTES COLETADAS:
+- Ministério da Fazenda (página principal da Reforma Tributária)
+- Receita Federal (reforma do consumo)
+- Páginas de Notícias do Ministério da Fazenda e Receita Federal
 
-Pergunta:
+REGRAS OBRIGATÓRIAS:
+1. Priorize informações de notícias recentes quando a pergunta for sobre atualizações
+2. Não invente informações - Use apenas o que está nos textos fornecidos
+3. Se a informação não estiver nos textos, diga explicitamente:
+   "Não encontrei essa informação nos textos oficiais coletados agora."
+4. Sempre cite a fonte/portal onde encontrou a informação
+5. Ignore menus, navegação e códigos de site
+6. Quando houver LISTA DE NOTÍCIAS no texto, use para responder perguntas sobre atualizações
+
+Pergunta do usuário:
 {pergunta_usuario}
 
-TEXTOS OFICIAIS:
+TEXTOS COLETADOS DOS PORTAIS:
 {' '.join(contexto)}
 """
 
@@ -761,12 +826,18 @@ def responder_chat_oficial_inteligente(pergunta_usuario: str) -> Tuple[str, str,
         except Exception:
             pass
 
-    # fallback oficial REAL com scraping
-    dados_portais, falhas = coletar_todos_portais()
-    if not dados_portais:
+    # fallback oficial REAL com scraping + notícias
+    dados_portais, falhas_portais = coletar_todos_portais()
+    dados_noticias, falhas_noticias = coletar_noticias()
+    
+    # Combinar portais principais + notícias
+    dados_combinados = dados_portais + dados_noticias
+    falhas = falhas_portais + falhas_noticias
+    
+    if not dados_combinados:
         raise RuntimeError("Não foi possível coletar os portais oficiais para responder em modo fallback.")
 
-    prompt_scraping = gerar_prompt_chat_oficial_scraping(pergunta_usuario, dados_portais)
+    prompt_scraping = gerar_prompt_chat_oficial_scraping(pergunta_usuario, dados_combinados)
     rota = decidir_roteamento(
         task_type="official_chat",
         prompt=prompt_scraping,

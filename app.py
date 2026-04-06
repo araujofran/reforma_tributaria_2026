@@ -343,6 +343,63 @@ def limpar_html_foco_noticias(html: str) -> str:
     return texto[:15000]
 
 
+def extrair_lista_noticias_formatada(html: str) -> List[Dict[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    noticias = []
+    
+    for link in soup.find_all("a"):
+        texto = link.get_text(strip=True)
+        href = link.get("href", "")
+        
+        if texto and len(texto) > 40 and "/noticias/" in href:
+            data_tag = link.find_parent("section") or link.find_parent("article")
+            data = ""
+            if data_tag:
+                data_span = data_tag.find("span") or data_tag.find("time") or data_tag.find("p")
+                if data_span:
+                    data = data_span.get_text(strip=True)[:20]
+            
+            if data:
+                noticias.append({
+                    "titulo": texto[:150],
+                    "url": href if href.startswith("http") else f"https://www.gov.br{href}",
+                    "data": data
+                })
+    
+    seen = set()
+    unique_noticias = []
+    for n in noticias:
+        if n["titulo"] not in seen:
+            seen.add(n["titulo"])
+            unique_noticias.append(n)
+    
+    return unique_noticias[:20]
+
+
+def coletar_lista_noticias() -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    dados_noticias = []
+    falhas = []
+
+    for portal in URLS_NOTICIAS:
+        nome = portal["nome"]
+        url = portal["url"]
+        try:
+            html = baixar_html(url)
+            noticias = extrair_lista_noticias_formatada(html)
+            for n in noticias:
+                dados_noticias.append({
+                    "nome": nome,
+                    "url": n["url"],
+                    "texto": f"TÍTULO: {n['titulo']} | DATA: {n['data']}",
+                    "hash": "",
+                    "coletado_em": agora_str()
+                })
+        except Exception as e:
+            falhas.append({"portal": nome, "url": url, "erro": str(e)})
+
+    return dados_noticias, falhas
+
+
 # =========================================================
 # COMPARAÇÃO
 # =========================================================
@@ -450,6 +507,31 @@ Pergunta do usuário:
 
 TEXTOS COLETADOS DOS PORTAIS:
 {' '.join(contexto)}
+"""
+
+
+def gerar_prompt_lista_noticias(pergunta_usuario: str, lista_noticias: List[Dict[str, str]]) -> str:
+    noticias_formatadas = "\n".join([
+        f"- [{n['data']}] {n['titulo']} (URL: {n['url']})"
+        for n in lista_noticias
+    ]) if lista_noticias else "Nenhuma notícia encontrada."
+
+    return f"""
+Você é um assistente de informações fiscais. Seu trabalho é formatar e apresentar a lista de notícias mais recentes sobre a Reforma Tributária de forma clara e organizada.
+
+INSTRUÇÕES:
+1. Liste as notícias em ordem cronológica (mais recente primeiro)
+2. Para cada notícia, mostre: data, título e link
+3. Se o usuário perguntar sobre algo específico, destaque as notícias relevantes
+4. Responda de forma direta e útil
+
+NOTÍCIAS MAIS RECENTES COLETADAS DOS PORTAIS GOVERNAMENTAIS:
+{noticias_formatadas}
+
+Pergunta do usuário:
+{pergunta_usuario}
+
+Responder em formato de lista organizada.
 """
 
 
@@ -819,8 +901,32 @@ def executar_llm_por_ordem(
 # WRAPPERS DE TAREFA
 # =========================================================
 def responder_chat_oficial_inteligente(pergunta_usuario: str) -> Tuple[str, str, str]:
-    gemini_cooldown, _ = gemini_em_cooldown()
-
+    pergunta_lower = pergunta_usuario.lower()
+    
+    # Verificar se é pergunta sobre notícias recentes
+    palavras_noticia = ["notícia", "noticias", "últimas", "novidade", "atualização", "atualizacoes", "o que tem de novo", "quais as notícias"]
+    eh_pergunta_noticia = any(p in pergunta_lower for p in palavras_noticia)
+    
+    if eh_pergunta_noticia:
+        lista_noticias, falhas_noticias = coletar_lista_noticias()
+        
+        if lista_noticias:
+            prompt_noticias = gerar_prompt_lista_noticias(pergunta_usuario, lista_noticias)
+            rota = decidir_roteamento(
+                task_type="official_chat",
+                prompt=prompt_noticias,
+                need_search=False,
+                official_context_ready=True
+            )
+            st.session_state.router_state["last_router_reason"] = rota["motivo"]
+            
+            texto, provider = executar_llm_por_ordem(
+                ordem=rota["ordem"],
+                prompt=prompt_noticias,
+                usar_google_search_no_gemini=False
+            )
+            return texto, provider, rota["motivo"]
+    
     # Sempre faz scraping + notícias para ter contexto completo (mais confiável)
     dados_portais, falhas_portais = coletar_todos_portais()
     dados_noticias, falhas_noticias = coletar_noticias()

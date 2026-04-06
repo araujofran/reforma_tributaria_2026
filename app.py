@@ -617,7 +617,12 @@ def chamar_gemini(prompt: str, usar_google_search: bool = False):
     if not gemini_model:
         raise RuntimeError("Gemini não configurado.")
     if usar_google_search:
-        return gemini_model.generate_content(prompt, tools="google_search_retrieval")
+        try:
+            return gemini_model.generate_content(prompt, tools="google_search_retrieval")
+        except Exception as e:
+            if "google_search_retrieval" in str(e) or "not supported" in str(e).lower():
+                raise RuntimeError("Google Search não disponível neste modelo")
+            raise
     return gemini_model.generate_content(prompt)
 
 
@@ -816,31 +821,10 @@ def executar_llm_por_ordem(
 def responder_chat_oficial_inteligente(pergunta_usuario: str) -> Tuple[str, str, str]:
     gemini_cooldown, _ = gemini_em_cooldown()
 
-    # Se Gemini estiver saudável, tenta busca primeiro
-    if gemini_model and not gemini_cooldown:
-        rota = decidir_roteamento(
-            task_type="official_chat",
-            prompt=pergunta_usuario,
-            need_search=True,
-            official_context_ready=False
-        )
-        st.session_state.router_state["last_router_reason"] = rota["motivo"]
-
-        try:
-            texto, provider = executar_llm_por_ordem(
-                ordem=rota["ordem"],
-                prompt=gerar_prompt_chat_oficial_gemini(pergunta_usuario),
-                usar_google_search_no_gemini=True
-            )
-            return texto, provider, rota["motivo"]
-        except Exception:
-            pass
-
-    # fallback oficial REAL com scraping + notícias
+    # Sempre faz scraping + notícias para ter contexto completo (mais confiável)
     dados_portais, falhas_portais = coletar_todos_portais()
     dados_noticias, falhas_noticias = coletar_noticias()
     
-    # Combinar portais principais + notícias
     dados_combinados = dados_portais + dados_noticias
     falhas = falhas_portais + falhas_noticias
     
@@ -848,6 +832,7 @@ def responder_chat_oficial_inteligente(pergunta_usuario: str) -> Tuple[str, str,
         raise RuntimeError("Não foi possível coletar os portais oficiais para responder em modo fallback.")
 
     prompt_scraping = gerar_prompt_chat_oficial_scraping(pergunta_usuario, dados_combinados)
+    
     rota = decidir_roteamento(
         task_type="official_chat",
         prompt=prompt_scraping,

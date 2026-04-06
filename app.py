@@ -54,12 +54,16 @@ URLS_OFICIAIS = [
 
 URLS_NOTICIAS = [
     {
-        "nome": "Ministério da Fazenda - Notícias Reforma Tributária",
-        "url": "https://www.gov.br/fazenda/pt-br/assuntos/noticias"
+        "nome": "Ministério da Fazenda - Reforma Tributária",
+        "url": "https://www.gov.br/fazenda/pt-br/acesso-a-informacao/acoes-e-programas/reforma-tributaria"
     },
     {
-        "nome": "Receita Federal - Notícias 2026",
-        "url": "https://www.gov.br/receitafederal/pt-br/assuntos/noticias/2026"
+        "nome": "Receita Federal - Reforma Consumo",
+        "url": "https://www.gov.br/receitafederal/pt-br/acesso-a-informacao/acoes-e-programas/programas-e-atividades/reforma-consumo"
+    },
+    {
+        "nome": "Notícia - Federalismo Fiscal Cooperativo",
+        "url": "https://www.gov.br/fazenda/pt-br/assuntos/noticias/2026/janeiro/nova-lei-de-regulamentacao-da-reforma-tributaria-aprofunda-o-federalismo-fiscal-cooperativo"
     }
 ]
 
@@ -261,9 +265,15 @@ def extrair_noticias_da_url(url: str, limite_chars: int = 12000) -> str:
     return texto[:limite_chars]
 
 
+def extrair_conteudo_completo(url: str, limite_chars: int = 15000) -> str:
+    html = baixar_html(url)
+    texto = limpar_html_para_texto(html)
+    return texto[:limite_chars]
+
+
 def coletar_portal(nome: str, url: str, eh_noticia: bool = False) -> Dict[str, str]:
     if eh_noticia:
-        texto = extrair_noticias_da_url(url)
+        texto = extrair_conteudo_completo(url)
     else:
         texto = extrair_texto_da_url(url)
     return {

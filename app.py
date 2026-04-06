@@ -4,7 +4,7 @@ import time
 import json
 import random
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -17,7 +17,7 @@ from curl_cffi import requests as requests_cffi
 # CONFIGURAÇÃO GERAL
 # =========================================================
 st.set_page_config(
-    page_title="Assistente Fiscal - Gabriela | V3",
+    page_title="Assistente Fiscal - Gabriela | V4",
     layout="wide"
 )
 
@@ -59,20 +59,38 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "")
 
-# Modelos default. Você pode trocar nos secrets se quiser.
 GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_MODEL = st.secrets.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 OPENROUTER_MODEL = st.secrets.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 
-# OpenRouter recomenda headers opcionais para identificação do app
 OPENROUTER_APP_NAME = st.secrets.get("OPENROUTER_APP_NAME", "Assistente Fiscal Gabriela")
 OPENROUTER_APP_URL = st.secrets.get("OPENROUTER_APP_URL", "https://localhost")
+
+# =========================================================
+# SESSION STATE INICIAL
+# =========================================================
+if "router_state" not in st.session_state:
+    st.session_state.router_state = {
+        "gemini_cooldown_until": None,
+        "gemini_calls_success": 0,
+        "groq_calls_success": 0,
+        "openrouter_calls_success": 0,
+        "last_provider_used": None,
+        "last_router_reason": None,
+    }
+
+if "mensagens_chat_oficial_v4" not in st.session_state:
+    st.session_state.mensagens_chat_oficial_v4 = []
 
 # =========================================================
 # FUNÇÕES AUXILIARES - DATA / JSON / HASH
 # =========================================================
 def agora_str() -> str:
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+
+def agora_dt() -> datetime:
+    return datetime.now()
 
 
 def agora_arquivo() -> str:
@@ -100,23 +118,21 @@ def gerar_hash_texto(texto: str) -> str:
 # =========================================================
 def configurar_gemini():
     if not GEMINI_API_KEY:
-        return None, None
-
+        return None
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        return model, GEMINI_MODEL
+        return genai.GenerativeModel(GEMINI_MODEL)
     except Exception as e:
         st.warning(f"Gemini indisponível no carregamento: {e}")
-        return None, None
+        return None
 
 
-gemini_model, gemini_model_name = configurar_gemini()
+gemini_model = configurar_gemini()
 
 # =========================================================
-# FUNÇÕES AUXILIARES - ERROS / RETRY
+# FUNÇÕES AUXILIARES - ERROS / QUOTA / COOLDOWN
 # =========================================================
-def extrair_retry_seconds(mensagem_erro: str, default: int = 35) -> int:
+def extrair_retry_seconds(mensagem_erro: str, default: int = 60) -> int:
     try:
         padrao = r"retry in\s+([0-9]+(?:\.[0-9]+)?)s"
         match = re.search(padrao, mensagem_erro, re.IGNORECASE)
@@ -128,17 +144,40 @@ def extrair_retry_seconds(mensagem_erro: str, default: int = 35) -> int:
 
 
 def eh_erro_quota_429(erro: Exception) -> bool:
-    mensagem = str(erro).lower()
+    msg = str(erro).lower()
     return (
-        "429" in mensagem
-        or "quota exceeded" in mensagem
-        or "rate limit" in mensagem
-        or "too many requests" in mensagem
+        "429" in msg
+        or "quota exceeded" in msg
+        or "rate limit" in msg
+        or "too many requests" in msg
     )
 
 
+def definir_cooldown_gemini(segundos: int):
+    st.session_state.router_state["gemini_cooldown_until"] = (
+        agora_dt() + timedelta(seconds=segundos)
+    ).isoformat()
+
+
+def gemini_em_cooldown() -> Tuple[bool, int]:
+    raw = st.session_state.router_state.get("gemini_cooldown_until")
+    if not raw:
+        return False, 0
+
+    try:
+        dt = datetime.fromisoformat(raw)
+        restante = int((dt - agora_dt()).total_seconds())
+        if restante > 0:
+            return True, restante
+    except Exception:
+        pass
+
+    st.session_state.router_state["gemini_cooldown_until"] = None
+    return False, 0
+
+
 # =========================================================
-# FUNÇÕES AUXILIARES - SCRAPING
+# SCRAPING
 # =========================================================
 def baixar_html_com_curl_cffi(url: str) -> str:
     sess = requests_cffi.Session()
@@ -216,8 +255,24 @@ def coletar_portal(nome: str, url: str) -> Dict[str, str]:
     }
 
 
+def coletar_todos_portais() -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    dados_portais = []
+    falhas = []
+
+    for portal in URLS_OFICIAIS:
+        nome = portal["nome"]
+        url = portal["url"]
+        try:
+            item = coletar_portal(nome, url)
+            dados_portais.append(item)
+        except Exception as e:
+            falhas.append({"portal": nome, "url": url, "erro": str(e)})
+
+    return dados_portais, falhas
+
+
 # =========================================================
-# FUNÇÕES AUXILIARES - COMPARAÇÃO
+# COMPARAÇÃO
 # =========================================================
 def segmentar_texto_em_blocos(texto: str, tamanho_bloco: int = 1200) -> List[str]:
     palavras = texto.split()
@@ -259,36 +314,94 @@ def comparar_textos_textualmente(texto_antigo: str, texto_novo: str, max_novidad
     }
 
 
+def comparar_com_ultima_execucao(dados_portais: List[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
+    comparacoes = {}
+    ultima_execucao = ler_json(ARQUIVO_ULTIMA_EXECUCAO)
+    mapa_anterior = {}
+
+    if ultima_execucao and "dados_portais" in ultima_execucao:
+        for item in ultima_execucao["dados_portais"]:
+            mapa_anterior[item["nome"]] = item
+
+    for item in dados_portais:
+        anterior = mapa_anterior.get(item["nome"])
+        texto_antigo = anterior["texto"] if anterior else ""
+        comparacoes[item["nome"]] = comparar_textos_textualmente(
+            texto_antigo,
+            item["texto"],
+            max_novidades=12
+        )
+
+    return comparacoes
+
+
+def total_novidades(comparacoes: Dict[str, Dict[str, Any]]) -> int:
+    return sum(item.get("quantidade_novidades", 0) for item in comparacoes.values())
+
+
 # =========================================================
-# FUNÇÕES AUXILIARES - PROMPTS
+# PROMPTS
 # =========================================================
-def gerar_prompt_chat_oficial(pergunta_usuario: str) -> str:
+def gerar_prompt_chat_oficial_scraping(pergunta_usuario: str, dados_portais: List[Dict[str, str]]) -> str:
+    contexto = []
+    for item in dados_portais:
+        contexto.append(
+            f"""
+PORTAL: {item['nome']}
+URL: {item['url']}
+TEXTO:
+{item['texto']}
+"""
+        )
+
+    return f"""
+Você é um consultor fiscal sênior auxiliando a contadora Gabriela.
+
+RESPONDA APENAS com base nos textos extraídos destes 3 portais oficiais:
+1. Ministério da Fazenda
+2. Receita Federal
+3. CGIBS
+
+REGRAS:
+- Não use conhecimento prévio fora do texto fornecido
+- Se a resposta não estiver nos textos, diga:
+  "Não encontrei essa informação nos textos oficiais coletados agora."
+- Sempre diga em qual portal encontrou a informação
+- Responda de forma técnica, objetiva e útil
+- Ignore menus e navegação do site
+
+Pergunta:
+{pergunta_usuario}
+
+TEXTOS OFICIAIS:
+{' '.join(contexto)}
+"""
+
+
+def gerar_prompt_chat_oficial_gemini(pergunta_usuario: str) -> str:
     return f"""
 Atue como um consultor fiscal sênior auxiliando a contadora Gabriela.
 
 REGRA ABSOLUTA:
-Para responder à dúvida abaixo, você deve se basear apenas em informações desses três portais oficiais:
-1. gov.br/fazenda/pt-br/acesso-a-informacao/acoes-e-programas/reforma-tributaria
-2. cgibs.gov.br
-3. gov.br/receitafederal/pt-br/acesso-a-informacao/acoes-e-programas/programas-e-atividades/reforma-consumo
+Para responder à dúvida abaixo, baseie-se apenas nestes três portais oficiais:
+1. site:gov.br/fazenda/pt-br/acesso-a-informacao/acoes-e-programas/reforma-tributaria
+2. site:cgibs.gov.br
+3. site:gov.br/receitafederal/pt-br/acesso-a-informacao/acoes-e-programas/programas-e-atividades/reforma-consumo
 
-REGRAS DE RESPOSTA:
-- Não use conhecimento prévio fora desses portais.
+REGRAS:
+- Não use conhecimento prévio fora desses portais
 - Se a informação não existir nesses três sites, diga:
   "Não encontrei essa informação nas atualizações oficiais dos portais do Governo."
-- Sempre que possível, mencione em qual portal a resposta foi encontrada.
-- Responda de forma técnica, objetiva e útil para uma contadora.
-- Se houver divergência entre portais, informe isso claramente.
-- Priorize publicações normativas, comunicados, manuais, guias, datas de implantação e orientações operacionais.
+- Sempre que possível, mencione em qual portal a resposta foi encontrada
+- Responda de forma técnica, objetiva e útil
 
-Dúvida da Gabriela:
+Pergunta:
 {pergunta_usuario}
 """
 
 
 def gerar_prompt_relatorio_scraping(dados_portais: list, comparacoes: dict) -> str:
     blocos_texto = []
-
     for item in dados_portais:
         blocos_texto.append(
             f"""
@@ -335,7 +448,7 @@ REGRAS:
 - não invente normas
 - não extrapole além do que o texto sugere
 
-FORMATO OBRIGATÓRIO:
+FORMATO:
 1. Resumo executivo
 2. Novidades por portal
 3. Comparação com a última execução
@@ -352,9 +465,44 @@ FORMATO OBRIGATÓRIO:
 """
 
 
+def gerar_prompt_xml(conteudo_xml: str) -> str:
+    return f"""
+Você é um consultor tributário auxiliando a contadora Gabriela.
+
+Contexto:
+- Empresa emissora: Prestação de Serviços
+- Regime: Lucro Presumido
+
+Analise o XML abaixo e responda:
+1. Tipo de operação/serviço
+2. Tributos identificáveis no documento
+3. Possíveis impactos na transição IBS/CBS
+4. Cuidados de parametrização
+5. Riscos de interpretação ou cadastro
+
+XML:
+{conteudo_xml}
+"""
+
+
 # =========================================================
 # FALLBACK SEM IA
 # =========================================================
+def montar_relatorio_sem_ia_por_sem_novidade(comparacoes: dict) -> str:
+    return f"""
+## Sem análise por IA
+
+Nenhuma novidade textual relevante foi detectada nesta execução.
+
+### Resumo
+- Total de novidades detectadas: **{total_novidades(comparacoes)}**
+- Como não houve mudança material, a IA não foi chamada para economizar quota e custo.
+
+### Próximo passo
+- Execute novamente mais tarde para monitoramento contínuo.
+"""
+
+
 def montar_relatorio_fallback_sem_ia(dados_portais: list, comparacoes: dict) -> str:
     linhas = []
     linhas.append("## Relatório emergencial sem IA")
@@ -380,19 +528,25 @@ def montar_relatorio_fallback_sem_ia(dados_portais: list, comparacoes: dict) -> 
                 linhas.append(f"  {idx}. {novidade}")
         else:
             linhas.append("- Nenhuma novidade textual relevante detectada.")
-
         linhas.append("")
 
     linhas.append("### Recomendação")
-    linhas.append("- Reexecute a análise depois ou valide suas chaves/provedores alternativos.")
-
+    linhas.append("- Reexecute mais tarde ou valide as chaves dos provedores.")
     return "\n".join(linhas)
 
 
 # =========================================================
-# CLIENTES LLM - GROQ / OPENROUTER
+# CLIENTES LLM
 # =========================================================
-def chamar_groq_chat(prompt: str, temperature: float = 0.2, max_tokens: int = 2500) -> str:
+def chamar_gemini(prompt: str, usar_google_search: bool = False):
+    if not gemini_model:
+        raise RuntimeError("Gemini não configurado.")
+    if usar_google_search:
+        return gemini_model.generate_content(prompt, tools="google_search_retrieval")
+    return gemini_model.generate_content(prompt)
+
+
+def chamar_groq(prompt: str, temperature: float = 0.2, max_tokens: int = 2500) -> str:
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY não configurada.")
 
@@ -418,7 +572,7 @@ def chamar_groq_chat(prompt: str, temperature: float = 0.2, max_tokens: int = 25
     return data["choices"][0]["message"]["content"]
 
 
-def chamar_openrouter_chat(prompt: str, temperature: float = 0.2, max_tokens: int = 2500) -> str:
+def chamar_openrouter(prompt: str, temperature: float = 0.2, max_tokens: int = 2500) -> str:
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY não configurada.")
 
@@ -446,73 +600,243 @@ def chamar_openrouter_chat(prompt: str, temperature: float = 0.2, max_tokens: in
     return data["choices"][0]["message"]["content"]
 
 
-def chamar_gemini(prompt: str, usar_google_search: bool = False):
-    if not gemini_model:
-        raise RuntimeError("Gemini não configurado.")
-    if usar_google_search:
-        return gemini_model.generate_content(prompt, tools="google_search_retrieval")
-    return gemini_model.generate_content(prompt)
+# =========================================================
+# ROTEADOR INTELIGENTE
+# =========================================================
+def classificar_complexidade_prompt(prompt: str) -> str:
+    tamanho = len(prompt)
+    if tamanho < 4000:
+        return "baixa"
+    if tamanho < 12000:
+        return "media"
+    return "alta"
 
 
-def gerar_texto_com_fallback(
+def decidir_roteamento(
+    task_type: str,
     prompt: str,
-    usar_google_search_no_gemini: bool = False,
-    max_tentativas_gemini: int = 3
+    need_search: bool = False,
+    official_context_ready: bool = False,
+    novidades_detectadas: int = 0
+) -> Dict[str, Any]:
+    complexidade = classificar_complexidade_prompt(prompt)
+    gemini_cooldown, cooldown_restante = gemini_em_cooldown()
+
+    # Regras principais
+    if task_type == "official_chat":
+        if need_search and not gemini_cooldown and gemini_model:
+            return {
+                "ordem": ["gemini", "groq", "openrouter"],
+                "motivo": "Pergunta oficial com necessidade de busca; Gemini priorizado."
+            }
+        return {
+            "ordem": ["groq", "openrouter", "gemini"],
+            "motivo": (
+                "Gemini em cooldown/ausente ou busca não disponível; "
+                "usando scraping oficial + modelo alternativo."
+            )
+        }
+
+    if task_type == "scraping_report":
+        if novidades_detectadas == 0:
+            return {
+                "ordem": [],
+                "motivo": "Nenhuma novidade detectada; IA será pulada para economizar quota."
+            }
+
+        if complexidade == "baixa":
+            return {
+                "ordem": ["groq", "openrouter", "gemini"],
+                "motivo": "Relatório curto/simples; priorizando menor custo e maior velocidade."
+            }
+
+        if complexidade == "media":
+            if gemini_cooldown:
+                return {
+                    "ordem": ["groq", "openrouter"],
+                    "motivo": f"Gemini em cooldown por {cooldown_restante}s; priorizando Groq/OpenRouter."
+                }
+            return {
+                "ordem": ["groq", "gemini", "openrouter"],
+                "motivo": "Complexidade média; Groq primeiro e Gemini como reforço."
+            }
+
+        # alta
+        if gemini_cooldown:
+            return {
+                "ordem": ["groq", "openrouter"],
+                "motivo": f"Prompt complexo, mas Gemini em cooldown por {cooldown_restante}s."
+            }
+        return {
+            "ordem": ["gemini", "groq", "openrouter"],
+            "motivo": "Prompt complexo; priorizando qualidade do Gemini."
+        }
+
+    if task_type == "xml_analysis":
+        if complexidade == "alta" and gemini_model and not gemini_cooldown:
+            return {
+                "ordem": ["gemini", "groq", "openrouter"],
+                "motivo": "XML longo/complexo; Gemini priorizado."
+            }
+        return {
+            "ordem": ["groq", "openrouter", "gemini"],
+            "motivo": "XML simples/médio; priorizando custo e velocidade."
+        }
+
+    return {
+        "ordem": ["groq", "openrouter", "gemini"],
+        "motivo": "Rota padrão otimizada para custo/performance."
+    }
+
+
+def executar_llm_por_ordem(
+    ordem: List[str],
+    prompt: str,
+    usar_google_search_no_gemini: bool = False
 ) -> Tuple[str, str]:
-    """
-    Retorna (texto, provedor_usado)
-    Ordem:
-    1. Gemini
-    2. Groq
-    3. OpenRouter
-    """
-    # 1) GEMINI
-    if gemini_model:
-        ultimo_erro_gemini = None
-        for tentativa in range(1, max_tentativas_gemini + 1):
-            try:
+    ultimo_erro = None
+
+    for provider in ordem:
+        try:
+            if provider == "gemini":
                 resposta = chamar_gemini(prompt, usar_google_search=usar_google_search_no_gemini)
                 texto = getattr(resposta, "text", None)
                 if not texto:
                     raise RuntimeError("Gemini não retornou texto utilizável.")
+                st.session_state.router_state["gemini_calls_success"] += 1
+                st.session_state.router_state["last_provider_used"] = f"Gemini ({GEMINI_MODEL})"
                 return texto, f"Gemini ({GEMINI_MODEL})"
-            except Exception as e:
-                ultimo_erro_gemini = e
-                if eh_erro_quota_429(e) and tentativa < max_tentativas_gemini:
-                    espera = extrair_retry_seconds(str(e), default=35) + random.randint(1, 3)
-                    with st.spinner(f"Gemini com cota temporariamente excedida. Aguardando {espera}s para retry ({tentativa}/{max_tentativas_gemini})..."):
-                        time.sleep(espera)
-                else:
-                    break
-        st.warning(f"Gemini indisponível nesta tentativa: {ultimo_erro_gemini}")
 
-    # 2) GROQ
-    if GROQ_API_KEY:
-        try:
-            texto = chamar_groq_chat(prompt)
-            return texto, f"Groq ({GROQ_MODEL})"
+            if provider == "groq":
+                texto = chamar_groq(prompt)
+                st.session_state.router_state["groq_calls_success"] += 1
+                st.session_state.router_state["last_provider_used"] = f"Groq ({GROQ_MODEL})"
+                return texto, f"Groq ({GROQ_MODEL})"
+
+            if provider == "openrouter":
+                texto = chamar_openrouter(prompt)
+                st.session_state.router_state["openrouter_calls_success"] += 1
+                st.session_state.router_state["last_provider_used"] = f"OpenRouter ({OPENROUTER_MODEL})"
+                return texto, f"OpenRouter ({OPENROUTER_MODEL})"
+
         except Exception as e:
-            st.warning(f"Groq indisponível nesta tentativa: {e}")
+            ultimo_erro = e
 
-    # 3) OPENROUTER
-    if OPENROUTER_API_KEY:
+            if provider == "gemini" and eh_erro_quota_429(e):
+                espera = extrair_retry_seconds(str(e), default=60) + random.randint(1, 3)
+                definir_cooldown_gemini(espera)
+                st.warning(
+                    f"Gemini entrou em cooldown por {espera}s após quota excedida. "
+                    f"Indo para fallback automático."
+                )
+            else:
+                st.warning(f"{provider.upper()} falhou nesta tentativa: {e}")
+
+    raise RuntimeError(f"Nenhum provedor respondeu com sucesso. Último erro: {ultimo_erro}")
+
+
+# =========================================================
+# WRAPPERS DE TAREFA
+# =========================================================
+def responder_chat_oficial_inteligente(pergunta_usuario: str) -> Tuple[str, str, str]:
+    gemini_cooldown, _ = gemini_em_cooldown()
+
+    # Se Gemini estiver saudável, tenta busca primeiro
+    if gemini_model and not gemini_cooldown:
+        rota = decidir_roteamento(
+            task_type="official_chat",
+            prompt=pergunta_usuario,
+            need_search=True,
+            official_context_ready=False
+        )
+        st.session_state.router_state["last_router_reason"] = rota["motivo"]
+
         try:
-            texto = chamar_openrouter_chat(prompt)
-            return texto, f"OpenRouter ({OPENROUTER_MODEL})"
-        except Exception as e:
-            st.warning(f"OpenRouter indisponível nesta tentativa: {e}")
+            texto, provider = executar_llm_por_ordem(
+                ordem=rota["ordem"],
+                prompt=gerar_prompt_chat_oficial_gemini(pergunta_usuario),
+                usar_google_search_no_gemini=True
+            )
+            return texto, provider, rota["motivo"]
+        except Exception:
+            pass
 
-    raise RuntimeError("Nenhum provedor LLM disponível no momento. Verifique GEMINI_API_KEY, GROQ_API_KEY e OPENROUTER_API_KEY.")
+    # fallback oficial REAL com scraping
+    dados_portais, falhas = coletar_todos_portais()
+    if not dados_portais:
+        raise RuntimeError("Não foi possível coletar os portais oficiais para responder em modo fallback.")
+
+    prompt_scraping = gerar_prompt_chat_oficial_scraping(pergunta_usuario, dados_portais)
+    rota = decidir_roteamento(
+        task_type="official_chat",
+        prompt=prompt_scraping,
+        need_search=False,
+        official_context_ready=True
+    )
+    st.session_state.router_state["last_router_reason"] = rota["motivo"]
+
+    texto, provider = executar_llm_por_ordem(
+        ordem=rota["ordem"],
+        prompt=prompt_scraping,
+        usar_google_search_no_gemini=False
+    )
+
+    if falhas:
+        texto += "\n\n> Observação: houve falha de coleta em um ou mais portais nesta execução."
+
+    return texto, provider, rota["motivo"]
+
+
+def gerar_relatorio_scraping_inteligente(
+    dados_portais: List[Dict[str, str]],
+    comparacoes: Dict[str, Dict[str, Any]]
+) -> Tuple[str, str, str]:
+    qtd_novidades = total_novidades(comparacoes)
+
+    rota = decidir_roteamento(
+        task_type="scraping_report",
+        prompt=gerar_prompt_relatorio_scraping(dados_portais, comparacoes),
+        novidades_detectadas=qtd_novidades
+    )
+    st.session_state.router_state["last_router_reason"] = rota["motivo"]
+
+    if not rota["ordem"]:
+        return montar_relatorio_sem_ia_por_sem_novidade(comparacoes), "Sem IA", rota["motivo"]
+
+    prompt = gerar_prompt_relatorio_scraping(dados_portais, comparacoes)
+    texto, provider = executar_llm_por_ordem(
+        ordem=rota["ordem"],
+        prompt=prompt,
+        usar_google_search_no_gemini=False
+    )
+    return texto, provider, rota["motivo"]
+
+
+def analisar_xml_inteligente(conteudo_xml: str) -> Tuple[str, str, str]:
+    prompt = gerar_prompt_xml(conteudo_xml)
+    rota = decidir_roteamento(
+        task_type="xml_analysis",
+        prompt=prompt
+    )
+    st.session_state.router_state["last_router_reason"] = rota["motivo"]
+
+    texto, provider = executar_llm_por_ordem(
+        ordem=rota["ordem"],
+        prompt=prompt,
+        usar_google_search_no_gemini=False
+    )
+    return texto, provider, rota["motivo"]
 
 
 # =========================================================
 # EXPORTAÇÃO
 # =========================================================
-def montar_texto_exportacao_relatorio(relatorio_ia: str, dados_portais: list, comparacoes: dict, provider_info: str) -> str:
+def montar_texto_exportacao_relatorio(relatorio_ia: str, dados_portais: list, comparacoes: dict, provider_info: str, router_reason: str) -> str:
     linhas = []
     linhas.append("RELATÓRIO DE MONITORAMENTO OFICIAL - REFORMA TRIBUTÁRIA")
     linhas.append(f"Gerado em: {agora_str()}")
     linhas.append(f"LLM utilizada: {provider_info}")
+    linhas.append(f"Decisão do roteador: {router_reason}")
     linhas.append("=" * 80)
     linhas.append("")
     linhas.append("RELATÓRIO")
@@ -531,27 +855,19 @@ def montar_texto_exportacao_relatorio(relatorio_ia: str, dados_portais: list, co
         else:
             linhas.append("Nenhuma novidade textual relevante detectada.")
 
-    linhas.append("\n" + "=" * 80)
-    linhas.append("PORTAIS CONSULTADOS")
-
-    for item in dados_portais:
-        linhas.append(f"\nPortal: {item['nome']}")
-        linhas.append(f"URL: {item['url']}")
-        linhas.append(f"Coletado em: {item['coletado_em']}")
-        linhas.append(f"Hash: {item['hash']}")
-
     return "\n".join(linhas)
 
 
-def montar_markdown_exportacao(relatorio_ia: str, dados_portais: list, comparacoes: dict, provider_info: str) -> str:
+def montar_markdown_exportacao(relatorio_ia: str, dados_portais: list, comparacoes: dict, provider_info: str, router_reason: str) -> str:
     md = []
     md.append("# Relatório de Monitoramento Oficial - Reforma Tributária")
     md.append(f"**Gerado em:** {agora_str()}")
-    md.append(f"**LLM utilizada:** {provider_info}\n")
+    md.append(f"**LLM utilizada:** {provider_info}")
+    md.append(f"**Decisão do roteador:** {router_reason}\n")
     md.append("## Relatório")
     md.append(relatorio_ia)
-    md.append("\n## Resumo de comparação por portal")
 
+    md.append("\n## Resumo de comparação por portal")
     for nome_portal, comp in comparacoes.items():
         md.append(f"\n### {nome_portal}")
         md.append(f"**Quantidade de novidades textuais:** {comp.get('quantidade_novidades', 0)}")
@@ -562,20 +878,14 @@ def montar_markdown_exportacao(relatorio_ia: str, dados_portais: list, comparaco
         else:
             md.append("- Nenhuma novidade textual relevante detectada.")
 
-    md.append("\n## Portais consultados")
-    for item in dados_portais:
-        md.append(f"\n### {item['nome']}")
-        md.append(f"- **URL:** {item['url']}")
-        md.append(f"- **Coletado em:** {item['coletado_em']}")
-        md.append(f"- **Hash:** `{item['hash']}`")
-
     return "\n".join(md)
 
 
-def salvar_execucao_atual(dados_portais: list, comparacoes: dict, relatorio_ia: str, provider_info: str):
+def salvar_execucao_atual(dados_portais: list, comparacoes: dict, relatorio_ia: str, provider_info: str, router_reason: str):
     payload = {
         "gerado_em": agora_str(),
         "provider_info": provider_info,
+        "router_reason": router_reason,
         "dados_portais": dados_portais,
         "comparacoes": comparacoes,
         "relatorio_ia": relatorio_ia
@@ -589,128 +899,67 @@ def salvar_execucao_atual(dados_portais: list, comparacoes: dict, relatorio_ia: 
 
 
 # =========================================================
-# INTERFACE
+# UI
 # =========================================================
-st.title("📊 Assistente Inteligente da Reforma Tributária — V3")
-# =========================================================
-# 🔍 DIAGNÓSTICO DE CHAVES (DEBUG LLMs)
-# =========================================================
-with st.expander("🔍 Diagnóstico de Conexão com LLMs (Debug)", expanded=False):
+st.title("📊 Assistente Inteligente da Reforma Tributária — V4")
+st.caption("Roteador automático de LLM com economia de quota e fallback oficial real.")
 
-    st.markdown("### 🔐 Verificação de Secrets")
-
+with st.expander("🔍 Diagnóstico de Conexão com LLMs", expanded=False):
+    tem_gemini = "GEMINI_API_KEY" in st.secrets
     tem_groq = "GROQ_API_KEY" in st.secrets
     tem_openrouter = "OPENROUTER_API_KEY" in st.secrets
-    tem_gemini = "GEMINI_API_KEY" in st.secrets
 
     col1, col2, col3 = st.columns(3)
-
     with col1:
         st.write("Gemini existe?", "✅" if tem_gemini else "❌")
-
     with col2:
         st.write("Groq existe?", "✅" if tem_groq else "❌")
-
     with col3:
         st.write("OpenRouter existe?", "✅" if tem_openrouter else "❌")
 
-    st.markdown("---")
-
-    st.markdown("### 🔎 Prefixos das Chaves (seguro)")
-
     if tem_gemini:
         st.write("Gemini prefixo:", st.secrets["GEMINI_API_KEY"][:6] + "...")
-
     if tem_groq:
         st.write("Groq prefixo:", st.secrets["GROQ_API_KEY"][:6] + "...")
-
     if tem_openrouter:
         st.write("OpenRouter prefixo:", st.secrets["OPENROUTER_API_KEY"][:6] + "...")
 
-    st.markdown("---")
+    cooldown, restante = gemini_em_cooldown()
+    st.write("Gemini em cooldown?", f"✅ {restante}s restantes" if cooldown else "❌")
 
-    st.markdown("### ⚠️ Diagnóstico Inteligente")
-
-    if not tem_groq and not tem_openrouter:
-        st.error("❌ Nenhum fallback configurado (Groq/OpenRouter). Seu sistema depende só do Gemini.")
-
-    elif tem_groq and not tem_openrouter:
-        st.warning("⚠️ Apenas Groq configurado. OpenRouter ainda não está ativo.")
-
-    elif not tem_groq and tem_openrouter:
-        st.warning("⚠️ Apenas OpenRouter configurado. Groq ainda não está ativo.")
-
-    elif tem_groq and tem_openrouter:
-        st.success("✅ Fallback completo ativo (Gemini + Groq + OpenRouter)")
-
-    if not tem_gemini:
-        st.error("❌ Gemini não configurado — você perderá o grounding (busca web)")
-
-    st.markdown("---")
-
-    st.markdown("### 🧠 Possíveis Problemas")
-
-    if not tem_groq or not tem_openrouter:
-        st.info("""
-Se a chave está correta mas aparece como ❌:
-
-1. Verifique se colocou no **Streamlit Cloud (Secrets)** e não só local
-2. Confirme o nome EXATO:
-   - GROQ_API_KEY
-   - OPENROUTER_API_KEY
-3. Reinicie o app (Deploy → Reboot)
-4. Verifique se o arquivo TOML não tem erro de sintaxe
-""")
-
-st.caption("Scraping oficial + fallback real de LLM: Gemini → Groq → OpenRouter")
-
-with st.expander("Status dos provedores configurados"):
-    st.write(f"Gemini: {'✅ configurado' if GEMINI_API_KEY else '❌ ausente'}")
-    st.write(f"Groq: {'✅ configurado' if GROQ_API_KEY else '❌ ausente'}")
-    st.write(f"OpenRouter: {'✅ configurado' if OPENROUTER_API_KEY else '❌ ausente'}")
-    st.write(f"Modelo Gemini: {GEMINI_MODEL}")
-    st.write(f"Modelo Groq: {GROQ_MODEL}")
-    st.write(f"Modelo OpenRouter: {OPENROUTER_MODEL}")
+    st.write("Gemini sucessos:", st.session_state.router_state["gemini_calls_success"])
+    st.write("Groq sucessos:", st.session_state.router_state["groq_calls_success"])
+    st.write("OpenRouter sucessos:", st.session_state.router_state["openrouter_calls_success"])
+    st.write("Último provedor usado:", st.session_state.router_state["last_provider_used"])
+    st.write("Última razão do roteador:", st.session_state.router_state["last_router_reason"])
 
 aba1, aba2, aba3, aba4 = st.tabs([
     "Radar Geral",
     "Análise de XML",
     "Chatbot Fiscal (Oficial)",
-    "Web Real V3"
+    "Web Real V4"
 ])
 
 # =========================================================
-# ABA 1 - RADAR GERAL
+# ABA 1
 # =========================================================
 with aba1:
-    st.header("Radar de Atualizações")
-    st.write("Usa Gemini com busca quando possível; se falhar, cai para outros provedores.")
+    st.header("Radar Geral")
+    st.write("Aqui eu recomendaria usar Groq como padrão e Gemini só quando necessário.")
 
-    if st.button("Buscar panorama do dia"):
-        prompt_busca = """
-Pesquise e resuma as últimas atualizações sobre a Reforma Tributária no Brasil,
-com foco em IBS, CBS, SPED, EFD-Reinf e DCTFWeb.
-Escreva para uma contadora de Lucro Presumido e Lucro Real.
-"""
-        with st.spinner("Consultando LLMs..."):
-            try:
-                texto, provider_info = gerar_texto_com_fallback(
-                    prompt_busca,
-                    usar_google_search_no_gemini=True,
-                    max_tentativas_gemini=3
-                )
-                st.success(f"Resposta gerada com: {provider_info}")
-                st.markdown(texto)
-            except Exception as e:
-                st.error(f"Erro ao consultar os provedores: {e}")
+    if st.button("Mostrar estratégia atual"):
+        st.markdown("""
+### Estratégia V4
+- **Chat oficial:** Gemini só se estiver saudável; senão scraping + Groq/OpenRouter.
+- **Web scraping:** se não houver novidade, não chama IA.
+- **XML:** Groq primeiro em casos simples/médios; Gemini só quando o prompt ficar pesado.
+""")
 
 # =========================================================
-# ABA 2 - XML
+# ABA 2
 # =========================================================
 with aba2:
     st.header("Análise de Impacto Tributário via XML")
-    st.write("Analisa o XML com fallback de provedores.")
-
     arquivo_xml = st.file_uploader("Selecione o arquivo XML", type=["xml"])
 
     if arquivo_xml is not None:
@@ -720,69 +969,44 @@ with aba2:
             st.code(conteudo_xml[:1500] + "\n... [truncado]", language="xml")
 
         if st.button("Analisar Operação"):
-            prompt_analise = f"""
-Você é um consultor tributário auxiliando a contadora Gabriela.
-
-Contexto:
-- Empresa emissora: Prestação de Serviços
-- Regime: Lucro Presumido
-
-Analise o XML abaixo e responda:
-1. Tipo de operação/serviço
-2. Tributos identificáveis no documento
-3. Possíveis impactos na transição IBS/CBS
-4. Cuidados de parametrização
-5. Riscos de interpretação ou cadastro
-
-XML:
-{conteudo_xml}
-"""
-            with st.spinner("Analisando XML..."):
+            with st.spinner("Roteando análise de XML..."):
                 try:
-                    texto, provider_info = gerar_texto_com_fallback(prompt_analise)
-                    st.success(f"Análise gerada com: {provider_info}")
+                    texto, provider, motivo = analisar_xml_inteligente(conteudo_xml)
+                    st.success(f"Resposta gerada com: {provider}")
+                    st.info(f"Decisão do roteador: {motivo}")
                     st.markdown(texto)
                 except Exception as e:
                     st.error(f"Erro ao analisar XML: {e}")
 
 # =========================================================
-# ABA 3 - CHAT OFICIAL
+# ABA 3
 # =========================================================
 with aba3:
     st.header("💬 Chatbot Fiscal (Fontes Oficiais)")
-    st.write("Prioriza Gemini com busca. Se falhar, tenta Groq e OpenRouter com o mesmo prompt restritivo.")
+    st.write("Usa Gemini com busca apenas quando vale a pena. Se não, usa scraping real + Groq/OpenRouter.")
 
-    if "mensagens_chat_oficial_v3" not in st.session_state:
-        st.session_state.mensagens_chat_oficial_v3 = []
-
-    for msg in st.session_state.mensagens_chat_oficial_v3:
+    for msg in st.session_state.mensagens_chat_oficial_v4:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
     pergunta_usuario = st.chat_input(
         "Ex: Quais as novas regras de transição publicadas hoje?",
-        key="chat_oficial_v3"
+        key="chat_oficial_v4"
     )
 
     if pergunta_usuario:
         st.chat_message("user").markdown(pergunta_usuario)
-        st.session_state.mensagens_chat_oficial_v3.append({
+        st.session_state.mensagens_chat_oficial_v4.append({
             "role": "user",
             "content": pergunta_usuario
         })
 
-        prompt_chat = gerar_prompt_chat_oficial(pergunta_usuario)
-
-        with st.spinner("Consultando provedores..."):
+        with st.spinner("Consultando provedores de forma otimizada..."):
             try:
-                texto, provider_info = gerar_texto_com_fallback(
-                    prompt_chat,
-                    usar_google_search_no_gemini=True,
-                    max_tentativas_gemini=3
-                )
-                resposta_final = f"**Fonte de geração:** {provider_info}\n\n{texto}"
+                texto, provider, motivo = responder_chat_oficial_inteligente(pergunta_usuario)
+                resposta_final = f"**Fonte de geração:** {provider}\n\n**Decisão do roteador:** {motivo}\n\n{texto}"
                 st.chat_message("assistant").markdown(resposta_final)
-                st.session_state.mensagens_chat_oficial_v3.append({
+                st.session_state.mensagens_chat_oficial_v4.append({
                     "role": "assistant",
                     "content": resposta_final
                 })
@@ -790,18 +1014,17 @@ with aba3:
                 st.error(f"Erro no chat oficial: {e}")
 
 # =========================================================
-# ABA 4 - WEB REAL V3
+# ABA 4
 # =========================================================
 with aba4:
-    st.header("🏛️ Web Real V3")
+    st.header("🏛️ Web Real V4")
     st.write(
-        "Coleta HTML dos portais oficiais, extrai texto, compara com a última execução, "
-        "e gera relatório com fallback real: Gemini → Groq → OpenRouter."
+        "Coleta HTML dos portais oficiais, detecta mudanças e só usa IA quando houver valor real."
     )
 
     col1, col2 = st.columns(2)
     with col1:
-        executar_scraping = st.button("Executar Monitoramento Oficial V3")
+        executar_scraping = st.button("Executar Monitoramento Oficial V4")
     with col2:
         mostrar_ultima = st.button("Ver Última Execução Salva")
 
@@ -809,49 +1032,16 @@ with aba4:
         ultima = ler_json(ARQUIVO_ULTIMA_EXECUCAO)
         if ultima:
             st.info(f"Última execução encontrada: {ultima.get('gerado_em', 'N/A')}")
-            st.write(f"LLM usada na última execução: {ultima.get('provider_info', 'N/A')}")
+            st.write(f"LLM usada: {ultima.get('provider_info', 'N/A')}")
+            st.write(f"Decisão do roteador: {ultima.get('router_reason', 'N/A')}")
             with st.expander("Abrir relatório da última execução"):
                 st.markdown(ultima.get("relatorio_ia", "Sem relatório salvo."))
         else:
             st.warning("Ainda não existe execução anterior salva.")
 
     if executar_scraping:
-        dados_portais = []
-        comparacoes = {}
-        falhas = []
-        provider_info = "Nenhuma"
-        texto_relatorio_final = ""
-
-        ultima_execucao = ler_json(ARQUIVO_ULTIMA_EXECUCAO)
-        mapa_anterior = {}
-
-        if ultima_execucao and "dados_portais" in ultima_execucao:
-            for item in ultima_execucao["dados_portais"]:
-                mapa_anterior[item["nome"]] = item
-
-        with st.spinner("Iniciando coleta com tratamento avançado de conexão e compatibilidade TLS..."):
-            for portal in URLS_OFICIAIS:
-                nome = portal["nome"]
-                url = portal["url"]
-
-                try:
-                    item_atual = coletar_portal(nome, url)
-                    dados_portais.append(item_atual)
-
-                    item_antigo = mapa_anterior.get(nome)
-                    texto_antigo = item_antigo["texto"] if item_antigo else ""
-                    comparacao = comparar_textos_textualmente(
-                        texto_antigo,
-                        item_atual["texto"],
-                        max_novidades=12
-                    )
-                    comparacoes[nome] = comparacao
-
-                    st.toast(f"✅ Coleta concluída: {nome}")
-                except Exception as e:
-                    falhas.append({"portal": nome, "url": url, "erro": str(e)})
-                    comparacoes[nome] = {"novidades": [], "quantidade_novidades": 0}
-                    st.warning(f"Falha ao acessar {nome}")
+        with st.spinner("Coletando portais oficiais..."):
+            dados_portais, falhas = coletar_todos_portais()
 
         if falhas:
             with st.expander("Detalhes das falhas de coleta"):
@@ -862,24 +1052,35 @@ with aba4:
                         f"Erro: {falha['erro']}\n"
                     )
 
-        if dados_portais:
-            prompt_relatorio = gerar_prompt_relatorio_scraping(dados_portais, comparacoes)
+        if not dados_portais:
+            st.error("Não foi possível extrair texto de nenhum dos portais oficiais.")
+        else:
+            comparacoes = comparar_com_ultima_execucao(dados_portais)
+            qtd = total_novidades(comparacoes)
 
-            with st.spinner("Gerando relatório analítico..."):
+            st.markdown(f"### Total de novidades detectadas: **{qtd}**")
+
+            with st.spinner("Aplicando roteador inteligente..."):
                 try:
-                    texto_relatorio_final, provider_info = gerar_texto_com_fallback(
-                        prompt_relatorio,
-                        usar_google_search_no_gemini=False,
-                        max_tentativas_gemini=3
+                    texto_relatorio_final, provider_info, router_reason = gerar_relatorio_scraping_inteligente(
+                        dados_portais,
+                        comparacoes
                     )
-                    st.success(f"Relatório gerado com: {provider_info}")
+
+                    if provider_info == "Sem IA":
+                        st.info("Nenhuma novidade material detectada. IA não foi usada para economizar quota.")
+                    else:
+                        st.success(f"Relatório gerado com: {provider_info}")
+
+                    st.info(f"Decisão do roteador: {router_reason}")
                     st.markdown("## Relatório Executivo")
                     st.markdown(texto_relatorio_final)
 
                 except Exception as e:
-                    st.warning(f"Não foi possível gerar com LLM. Motivo: {e}")
                     provider_info = "Fallback sem IA"
+                    router_reason = "Todos os provedores falharam; usando fallback textual sem IA."
                     texto_relatorio_final = montar_relatorio_fallback_sem_ia(dados_portais, comparacoes)
+                    st.warning(f"Não foi possível gerar com LLM. Motivo: {e}")
                     st.markdown(texto_relatorio_final)
 
             st.markdown("## Painel de Novidades Detectadas")
@@ -901,13 +1102,15 @@ with aba4:
                 texto_relatorio_final,
                 dados_portais,
                 comparacoes,
-                provider_info
+                provider_info,
+                router_reason
             )
             md_export = montar_markdown_exportacao(
                 texto_relatorio_final,
                 dados_portais,
                 comparacoes,
-                provider_info
+                provider_info,
+                router_reason
             )
 
             st.download_button(
@@ -924,7 +1127,11 @@ with aba4:
                 mime="text/markdown"
             )
 
-            salvar_execucao_atual(dados_portais, comparacoes, texto_relatorio_final, provider_info)
+            salvar_execucao_atual(
+                dados_portais,
+                comparacoes,
+                texto_relatorio_final,
+                provider_info,
+                router_reason
+            )
             st.info("Execução salva com sucesso para comparações futuras.")
-        else:
-            st.error("Não foi possível extrair texto de nenhum dos portais oficiais no momento.")

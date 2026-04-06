@@ -68,6 +68,302 @@ URLS_NOTICIAS = [
 ]
 
 # =========================================================
+# REGRAS DE TRIBUTAÇÃO CBS/IBS (Extraídas dos Manuais RTC)
+# =========================================================
+TRIBUTOS_RTC = {
+    "CBS": {
+        "nome": "Contribuição sobre Bens e Serviços",
+        "competencia": "União",
+        "substitui": ["PIS", "COFINS"],
+        "aliquota_padrao": 0.0,  # Será definida conforme o período
+    },
+    "IBS": {
+        "nome": "Imposto sobre Bens e Serviços",
+        "competencia": "Estados e Municípios",
+        "substitui": ["ICMS", "ISS"],
+        "aliquota_padrao": 0.0,
+    },
+    "IS": {
+        "nome": "Imposto Seletivo",
+        "competencia": "União",
+        "descricao": "Imposto do Pecado - produtos prejudiciais à saúde/meio ambiente",
+    }
+}
+
+CST_TRIBUTACAO = {
+    "000": {"descricao": "Tributação Normal", "tipo": "normal"},
+    "100": {"descricao": "Monofásica", "tipo": "especial"},
+    "200": {"descricao": "Alíquota Reduzida", "tipo": "reduzida"},
+    "300": {"descricao": "Isenção", "tipo": "isenção"},
+    "400": {"descricao": "Não Incidência", "tipo": "nao_incidencia"},
+    "500": {"descricao": "Suspensão", "tipo": "suspensão"},
+    "600": {"descricao": "Recolhimento Diferido", "tipo": "diferido"},
+    "900": {"descricao": "Imunidade", "tipo": "imunidade"},
+}
+
+MODELO_DOCUMENTO_FISCAL = {
+    "55": {"nome": "NF-e", "descricao": "Nota Fiscal Eletrônica"},
+    "65": {"nome": "NFC-e", "descricao": "Nota Fiscal de Consumidor Eletrônica"},
+    "57": {"nome": "CT-e", "descricao": "Conhecimento de Transporte Eletrônico"},
+    "67": {"nome": "CT-e OS", "descricao": "Conhecimento de Transporte Eletrônico Outros Serviços"},
+    "62": {"nome": "NFCom", "descricao": "Nota Fiscal de Serviço de Comunicação Eletrônica"},
+    "66": {"nome": "NF3e", "descricao": "Nota Fiscal de Energia Elétrica Eletrônica"},
+    "63": {"nome": "BP-e", "descricao": "Bilhete de Passagem Eletrônico"},
+}
+
+TIPOS_OPERACAO = {
+    "entrada": {"descricao": "Operação de Entrada (Compra)", "gera_credito": True, "gera_debito": False},
+    "saida": {"descricao": "Operação de Saída (Venda)", "gera_credito": False, "gera_debito": True},
+}
+
+REGIMES_ESPECIAIS = {
+    "PIS": "Contribuição para o PIS",
+    "COFINS": "Contribuição para o COFINS", 
+    "ICMS": "Imposto sobre Circulação de Mercadorias e Serviços",
+    "ISS": "Imposto sobre Serviços",
+    "IPI": "Imposto sobre Produtos Industrializados",
+    "CBS": "Contribuição sobre Bens e Serviços (Novo)",
+    "IBS": "Imposto sobre Bens e Serviços (Novo)",
+    "IS": "Imposto Seletivo (Novo)",
+}
+
+PERIODO_TRANSICAO = {
+    "2026": {
+        "descricao": "Ano teste",
+        "aliquota_cbs": 0.009,
+        "aliquota_ibs": 0.001,
+        "observacao": "Apenas destaque declaratório, sem pagamento"
+    },
+    "2027": {
+        "descricao": "CBS entra em vigor",
+        "aliquota_cbs": None,
+        "aliquota_ibs": None,
+        "observacao": "CBS e IBS passam a vigorar. PIS e COFINS extintos."
+    },
+    "2033": {
+        "descricao": "Transição completa",
+        "observacao": "Substituição completa dos tributos antigos"
+    }
+}
+
+
+def analisar_tributacao_xml(xml_content: str) -> Dict[str, Any]:
+    """
+    Analisa um XML de documento fiscal e determina a tributação CBS/IBS aplicável.
+    Baseado nas regras extraídas dos Manuais RTC.
+    """
+    import xml.etree.ElementTree as ET
+    
+    resultado = {
+        "documento_fiscal": None,
+        "tipo_operacao": None,
+        "modelo": None,
+        "serie": None,
+        "numero": None,
+        "data_emissao": None,
+        "natureza_operacao": None,
+        "tributos_identificados": [],
+        "cst": None,
+        "cclass_trib": None,
+        "informacoes_fiscais": [],
+        "regimes_encontrados": [],
+        "analise": "",
+    }
+    
+    try:
+        root = ET.fromstring(xml_content)
+        
+        # Namespace comumente usados
+        ns = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
+        
+        # Tentar encontrarinfNFe
+        infNFe = root.find('.//{http://www.portalfiscal.inf.br/nfe}infNFe')
+        if infNFe is None:
+            # Tentar sem namespace
+            infNFe = root.find('.//infNFe')
+        
+        if infNFe is None:
+            return {"erro": "XML não identificado como documento fiscal válido"}
+        
+        # Extrair informações básicas
+        resultado["modelo"] = infNFe.get('mod', 'Não identificado')
+        resultado["serie"] = infNFe.get('serie', 'Não identificado')
+        resultado["numero"] = infNFe.get('nNF', 'Não identificado')
+        
+        # Identificar tipo de operação (entrada/saída)
+        ide = root.find('.//{http://www.portalfiscal.inf.br/nfe}ide')
+        if ide is None:
+            ide = root.find('.//ide')
+        
+        if ide is not None:
+            tpNF = ide.find('{http://www.portalfiscal.inf.br/nfe}tpNF')
+            if tpNF is None:
+                tpNF = ide.find('tpNF')
+            
+            if tpNF is not None:
+                if tpNF.text == '0':
+                    resultado["tipo_operacao"] = "entrada"
+                elif tpNF.text == '1':
+                    resultado["tipo_operacao"] = "saida"
+            
+            resultado["data_emissao"] = ide.find('{http://www.portalfiscal.inf.br/nfe}dhEmi').text if ide.find('{http://www.portalfiscal.inf.br/nfe}dhEmi') is not None else None
+        
+        # Natureza da operação
+        natOp = root.find('.//{http://www.portalfiscal.inf.br/nfe}natOp')
+        if natOp is None:
+            natOp = root.find('.//natOp')
+        if natOp is not None:
+            resultado["natureza_operacao"] = natOp.text
+        
+        # Identificar documento fiscal
+        modelo_info = MODELO_DOCUMENTO_FISCAL.get(resultado["modelo"], {"nome": "Desconhecido"})
+        resultado["documento_fiscal"] = modelo_info["nome"]
+        
+        # Analisar produtos/impostos
+        detalhes = []
+        for det in root.findall('.//{http://www.portalfiscal.inf.br/nfe}det'):
+            # CST do produto
+            imp = det.find('.//{http://www.portalfiscal.inf.br/nfe}imposto')
+            if imp is None:
+                imp = det.find('.//imposto')
+            
+            if imp is not None:
+                # CBS
+                cbs = imp.find('.//{http://www.portalfiscal.inf.br/nfe}CBS')
+                if cbs is not None:
+                    cst_cbs = cbs.find('{http://www.portalfiscal.inf.br/nfe}CST')
+                    cclass = cbs.find('{http://www.portalfiscal.inf.br/nfe}cClassTrib')
+                    detalhes.append({
+                        "tributo": "CBS",
+                        "cst": cst_cbs.text if cst_cbs is not None else None,
+                        "cclass_trib": cclass.text if cclass is not None else None,
+                    })
+                    resultado["tributos_identificados"].append("CBS")
+                
+                # IBS
+                ibs = imp.find('.//{http://www.portalfiscal.inf.br/nfe}IBS')
+                if ibs is not None:
+                    cst_ibs = ibs.find('{http://www.portalfiscal.inf.br/nfe}CST')
+                    cclass = ibs.find('{http://www.portalfiscal.inf.br/nfe}cClassTrib')
+                    detalhes.append({
+                        "tributo": "IBS",
+                        "cst": cst_ibs.text if cst_ibs is not None else None,
+                        "cclass_trib": cclass.text if cclass is not None else None,
+                    })
+                    resultado["tributos_identificados"].append("IBS")
+                
+                # Imposto Seletivo
+                impSeletivo = imp.find('.//{http://www.portalfiscal.inf.br/nfe}ImpSeletivo')
+                if impSeletivo is not None:
+                    detalhes.append({"tributo": "Imposto Seletivo"})
+                    resultado["tributos_identificados"].append("Imposto Seletivo")
+                
+                # Verificar PIS/COFINS (tributos antigos que serão substituídos)
+                pis = imp.find('.//{http://www.portalfiscal.inf.br/nfe}PIS')
+                cofins = imp.find('.//{http://www.portalfiscal.inf.br/nfe}COFINS')
+                icms = imp.find('.//{http://www.portalfiscal.inf.br/nfe}ICMS')
+                iss = imp.find('.//{http://www.portalfiscal.inf.br/nfe}ISS')
+                
+                if pis is not None:
+                    resultado["regimes_encontrados"].append("PIS")
+                if cofins is not None:
+                    resultado["regimes_encontrados"].append("COFINS")
+                if icms is not None:
+                    resultado["regimes_encontrados"].append("ICMS")
+                if iss is not None:
+                    resultado["regimes_encontrados"].append("ISS")
+        
+        resultado["informacoes_fiscais"] = detalhes
+        
+        # Gerar análise
+        resultado["analise"] = gerar_analise_tributaria(resultado)
+        
+    except ET.ParseError as e:
+        return {"erro": f"Erro ao parsear XML: {str(e)}"}
+    except Exception as e:
+        return {"erro": f"Erro na análise: {str(e)}"}
+    
+    return resultado
+
+
+def gerar_analise_tributaria(analise: Dict[str, Any]) -> str:
+    """Gera uma análise textual baseada nos dados extraídos do XML"""
+    
+    if "erro" in analise:
+        return f"Erro: {analise['erro']}"
+    
+    linhas = []
+    
+    linhas.append("=" * 60)
+    linhas.append("ANÁLISE DE TRIBUTAÇÃO CBS/IBS - REFORMA TRIBUTÁRIA")
+    linhas.append("=" * 60)
+    
+    linhas.append(f"\n📄 Documento: {analise.get('documento_fiscal', 'N/A')}")
+    linhas.append(f"   Modelo: {analise.get('modelo', 'N/A')}")
+    linhas.append(f"   Número: {analise.get('numero', 'N/A')}")
+    linhas.append(f"   Série: {analise.get('serie', 'N/A')}")
+    linhas.append(f"   Data Emissão: {analise.get('data_emissao', 'N/A')}")
+    
+    tipo_op = analise.get('tipo_operacao', 'N/A')
+    if tipo_op == 'entrada':
+        linhas.append(f"\n📥 Tipo de Operação: ENTRADA (Compra)")
+        linhas.append("   → Gera CRÉDITO tributário para o comprador")
+    elif tipo_op == 'saida':
+        linhas.append(f"\n📤 Tipo de Operação: SAÍDA (Venda)")
+        linhas.append("   → Gera DÉBITO tributário para o vendedor")
+    
+    natureza = analise.get('natureza_operacao')
+    if natureza:
+        linhas.append(f"\n📝 Natureza da Operação: {natureza}")
+    
+    # Tributos identificados
+    tributos = analise.get('tributos_identificados', [])
+    if tributos:
+        linhas.append("\n💰 TRIBUTOS IDENTIFICADOS NO XML:")
+        for t in set(tributos):
+            info = TRIBUTOS_RTC.get(t, {})
+            linhas.append(f"   • {t}: {info.get('nome', '')}")
+            linhas.append(f"     Competência: {info.get('competencia', '')}")
+            if info.get('substitui'):
+                linhas.append(f"     Substitui: {', '.join(info['substitui'])}")
+    
+    # Regimes antigos encontrados
+    regimes = analise.get('regimes_encontrados', [])
+    if regimes:
+        linhas.append("\n⚠️  TRIBUTOS ATUAIS (serão substituídos):")
+        for r in regimes:
+            linhas.append(f"   • {r}")
+    
+    # Análise detailed
+    detalhes = analise.get('informacoes_fiscais', [])
+    if detalhes:
+        linhas.append("\n📊 DETALHAMENTO POR ITEM:")
+        for i, det in enumerate(detalhes, 1):
+            if det.get('tributo'):
+                linhas.append(f"   Item {i}:")
+                linhas.append(f"     Tributo: {det.get('tributo')}")
+                if det.get('cst'):
+                    cst_info = CST_TRIBUTACAO.get(det['cst'], {})
+                    linhas.append(f"     CST: {det['cst']} - {cst_info.get('descricao', '')}")
+                if det.get('cclass_trib'):
+                    linhas.append(f"     Classificação: {det['cclass_trib']}")
+    
+    linhas.append("\n" + "=" * 60)
+    linhas.append("INFORMAÇÕES ADICIONAIS:")
+    linhas.append("=" * 60)
+    
+    linhas.append(f"""
+📅 Período de Transição:
+• 2026: CBS/IBS com alíquotas reduzidas (0,9% + 0,1%)
+  → Destacado em nota fiscal, mas sem pagamento
+• 2027: CBS e IBS passam a vigorar normalmente
+• 2033: Substituição completa dos tributos atuais
+""")
+    
+    return "\n".join(linhas)
+
+
+# =========================================================
 # SECRETS / MODELOS
 # =========================================================
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -750,6 +1046,34 @@ XML:
 """
 
 
+def gerar_prompt_xml_completo(conteudo_xml: str, analise_regras: str) -> str:
+    return f"""
+Você é um consultor tributário sênior auxiliando a contadora Gabriela.
+
+Contexto da Reforma Tributária:
+- CBS (Contribuição sobre Bens e Serviços): Tributo federal que substitui PIS e COFINS
+- IBS (Imposto sobre Bens e Serviços): Tributo estadual/municipal que substitui ICMS e ISS
+- Imposto Seletivo: Para produtos prejudiciais à saúde/meio ambiente
+
+Período de Transição:
+- 2026: Ano teste com alíquotas reduzidas (0,9% CBS + 0,1% IBS) - destaque apenas declaratório
+- 2027: CBS e IBS passam a vigorar normalmente
+- 2033: Substituição completa dos tributos atuais
+
+Já foi realizada uma análise automática baseada nas regras dos Manuais RTC:
+{analise_regras}
+
+Com base no XML abaixo, complemente a análise acima com:
+1. Detalhamento técnico dos campos fiscais identificados
+2. Recomendação de como proceder no cadastro/parametrização
+3. Riscos específicos deste tipo de operação
+4. Quaisquer ajustes necessários na classificação tributária
+
+XML:
+{conteudo_xml[:15000]}
+"""
+
+
 # =========================================================
 # FALLBACK SEM IA
 # =========================================================
@@ -1167,6 +1491,37 @@ def gerar_relatorio_scraping_inteligente(
 
 
 def analisar_xml_inteligente(conteudo_xml: str) -> Tuple[str, str, str]:
+    # Primeiro, fazer análise baseada nas regras dos manuais
+    analise_regras = analisar_tributacao_xml(conteudo_xml)
+    
+    # Se a análise de regras encontrou informações válidas
+    if "erro" not in analise_regras and analise_regras.get("tributos_identificados"):
+        analise_texto = analise_regras.get("analise", "Análise disponível")
+        
+        # Complementar com IA se houver mais contexto necessário
+        if len(analise_regras.get("informacoes_fiscais", [])) > 0:
+            prompt = gerar_prompt_xml_completo(conteudo_xml, analise_texto)
+            rota = decidir_roteamento(
+                task_type="xml_analysis",
+                prompt=prompt
+            )
+            st.session_state.router_state["last_router_reason"] = rota["motivo"]
+
+            try:
+                texto_ia, provider = executar_llm_por_ordem(
+                    ordem=rota["ordem"],
+                    prompt=prompt,
+                    usar_google_search_no_gemini=False
+                )
+                # Combinar análise de regras com IA
+                resultado_final = analise_texto + "\n\n" + "="*60 + "\nANÁLISE COMPLEMENTAR:\n" + texto_ia
+                return resultado_final, provider, rota["motivo"]
+            except Exception as e:
+                return analise_texto, "Análise de Regras", "Análise baseada nas regras dos Manuais RTC"
+        
+        return analise_texto, "Análise de Regras", "Análise baseada nas regras dos Manuais RTC"
+    
+    # Fallback para análise via LLM se análise de regras falhar
     prompt = gerar_prompt_xml(conteudo_xml)
     rota = decidir_roteamento(
         task_type="xml_analysis",

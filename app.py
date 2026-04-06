@@ -360,10 +360,12 @@ def extrair_lista_noticias_formatada(html: str) -> List[Dict[str, str]]:
                     data = data_span.get_text(strip=True)[:20]
             
             if data:
+                href_completa = href if href.startswith("http") else f"https://www.gov.br{href}"
                 noticias.append({
                     "titulo": texto[:150],
-                    "url": href if href.startswith("http") else f"https://www.gov.br{href}",
-                    "data": data
+                    "url": href_completa,
+                    "data": data,
+                    "href_original": href
                 })
     
     seen = set()
@@ -374,6 +376,14 @@ def extrair_lista_noticias_formatada(html: str) -> List[Dict[str, str]]:
             unique_noticias.append(n)
     
     return unique_noticias[:20]
+
+
+def coletar_conteudo_noticia(url: str) -> str:
+    try:
+        html = baixar_html(url)
+        return limpar_html_para_texto(html)[:8000]
+    except:
+        return ""
 
 
 def coletar_lista_noticias() -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
@@ -398,6 +408,38 @@ def coletar_lista_noticias() -> Tuple[List[Dict[str, str]], List[Dict[str, str]]
             falhas.append({"portal": nome, "url": url, "erro": str(e)})
 
     return dados_noticias, falhas
+
+
+def buscar_noticias_por_palavra_chave(palavra_chave: str) -> List[Dict[str, str]]:
+    todas_noticias = []
+    
+    for portal in URLS_NOTICIAS:
+        try:
+            html = baixar_html(portal["url"])
+            noticias = extrair_lista_noticias_formatada(html)
+            for n in noticias:
+                n["nome_fonte"] = portal["nome"]
+                todas_noticias.append(n)
+        except:
+            pass
+    
+    palavra_lower = palavra_chave.lower()
+    noticias_relevantes = []
+    
+    for n in todas_noticias:
+        titulo_lower = n["titulo"].lower()
+        if palavra_lower in titulo_lower:
+            conteudo = coletar_conteudo_noticia(n["url"])
+            n["conteudo"] = conteudo
+            noticias_relevantes.append(n)
+    
+    if not noticias_relevantes:
+        for n in todas_noticias[:5]:
+            conteudo = coletar_conteudo_noticia(n["url"])
+            n["conteudo"] = conteudo
+            noticias_relevantes.append(n)
+    
+    return noticias_relevantes
 
 
 # =========================================================
@@ -907,6 +949,23 @@ def responder_chat_oficial_inteligente(pergunta_usuario: str) -> Tuple[str, str,
     palavras_noticia = ["notícia", "noticias", "últimas", "novidade", "atualização", "atualizacoes", "o que tem de novo", "quais as notícias"]
     eh_pergunta_noticia = any(p in pergunta_lower for p in palavras_noticia)
     
+    # Detectar palavras-chave específicas para buscar conteúdo completo
+    palavras_busca = []
+    if "chatbot" in pergunta_lower or "ia generativa" in pergunta_lower:
+        palavras_busca.append("chatbot")
+    if "federalismo" in pergunta_lower:
+        palavras_busca.append("federalismo")
+    if "comitê gestor" in pergunta_lower or "cgibs" in pergunta_lower:
+        palavras_busca.append("comitê gestor")
+    if "ibs" in pergunta_lower:
+        palavras_busca.append("ibs")
+    if "cbs" in pergunta_lower:
+        palavras_busca.append("cbs")
+    if "manual" in pergunta_lower or "lereutes" in pergunta_lower or "declaração de regimes" in pergunta_lower:
+        palavras_busca.append("manual")
+    if "lc 227" in pergunta_lower or "lei complementar 227" in pergunta_lower:
+        palavras_busca.append("lei complementar")
+    
     if eh_pergunta_noticia:
         lista_noticias, falhas_noticias = coletar_lista_noticias()
         
@@ -923,6 +982,55 @@ def responder_chat_oficial_inteligente(pergunta_usuario: str) -> Tuple[str, str,
             texto, provider = executar_llm_por_ordem(
                 ordem=rota["ordem"],
                 prompt=prompt_noticias,
+                usar_google_search_no_gemini=False
+            )
+            return texto, provider, rota["motivo"]
+    
+    # Se detectou palavra-chave específica, buscar conteúdo completo das notícias
+    if palavras_busca:
+        noticias_encontradas = []
+        for palavra in palavras_busca:
+            noticias = buscar_noticias_por_palavra_chave(palavra)
+            noticias_encontradas.extend(noticias)
+        
+        if noticias_encontradas:
+            contexto_noticias = []
+            for n in noticias_encontradas[:5]:
+                contexto_noticias.append(
+                    f"""
+NOTÍCIA: {n['titulo']}
+DATA: {n['data']}
+FONTE: {n.get('nome_fonte', 'Governo Federal')}
+URL: {n['url']}
+CONTEÚDO: {n.get('conteudo', 'Conteúdo não disponível')}
+"""
+                )
+            
+            prompt_completo = f"""
+Você é um consultor fiscal sênior. Responda à pergunta do usuário com base no conteúdo completo das notícias abaixo.
+
+Pergunta: {pergunta_usuario}
+
+NOTÍCIAS ENCONTRADAS:
+{' '.join(contexto_noticias)}
+
+INSTRUÇÕES:
+1. Forneça o conteúdo completo e detalhado das notícias encontradas
+2. Responda de forma técnica e objetiva
+3. Cite a fonte e data da informação
+4. Se a informação for partial, indique o que está faltando
+"""
+            rota = decidir_roteamento(
+                task_type="official_chat",
+                prompt=prompt_completo,
+                need_search=False,
+                official_context_ready=True
+            )
+            st.session_state.router_state["last_router_reason"] = rota["motivo"]
+            
+            texto, provider = executar_llm_por_ordem(
+                ordem=rota["ordem"],
+                prompt=prompt_completo,
                 usar_google_search_no_gemini=False
             )
             return texto, provider, rota["motivo"]
